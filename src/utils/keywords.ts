@@ -28,7 +28,7 @@ export function matchFirstMenuItem(
 }
 
 /**
- * 按总量（stockCount）匹配：选中第一个 stockCount < threshold 的套餐
+ * 按总量（stockCount）匹配：选中第一个 stockCount <= threshold 的套餐
  * 用于抢“限量”的饭
  */
 export function matchFirstByStockCount(
@@ -37,7 +37,7 @@ export function matchFirstByStockCount(
 ): MenuItem | null {
   if (!Number.isFinite(threshold)) return null
   for (const item of items) {
-    if (item.stockCount < threshold) return item
+    if (item.stockCount <= threshold) return item
   }
   return null
 }

@@ -3,12 +3,26 @@ import { getMenu, createOrder } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
 
-const MONITOR_INTERVAL_MS = 10_000
-
 const OPENID_KEY = 'kuang-eat-openid'
+
+/** 解析监控间隔（秒），仅接受 ≥1 的整数；无效返回 null */
+function parseMonitorIntervalSeconds(input: string): number | null {
+  const s = input.trim()
+  if (s === '') return null
+  const n = parseInt(s, 10)
+  return Number.isFinite(n) && n >= 1 ? n : null
+}
 
 function toMealDate(dateStr: string): string {
   return dateStr ? dateStr.replace(/-/g, '') : ''
+}
+
+/** 解析总量输入，仅接受 ≥0 的整数；无效返回 null */
+function parseStockThreshold(input: string): number | null {
+  const s = input.trim()
+  if (s === '') return null
+  const n = parseInt(s, 10)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 const MEAL_OPTIONS: { value: 1 | 2 | 3; label: string }[] = [
@@ -110,7 +124,7 @@ async function runOrderTask(
           const noMatchMsg =
             matchMode === 'keywords'
               ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-              : (list.length === 0 ? '暂无菜单' : `无总量 < ${stockThreshold} 的套餐`)
+              : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${stockThreshold} 的套餐`)
           results.push({
             date: dateStr,
             dateLabel,
@@ -147,7 +161,7 @@ function App() {
   })
   const [matchMode, setMatchMode] = useState<'keywords' | 'stock'>('keywords')
   const [keywords, setKeywords] = useState('金谷园')
-  const [stockThreshold, setStockThreshold] = useState(200)
+  const [stockThresholdInput, setStockThresholdInput] = useState('200')
   const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([2])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
@@ -158,6 +172,7 @@ function App() {
   const [isMonitoring, setIsMonitoring] = useState(false)
   const [runResults, setRunResults] = useState<RunDayResult[]>([])
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
+  const [monitorIntervalInput, setMonitorIntervalInput] = useState('5')
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
 
@@ -193,15 +208,18 @@ function App() {
 
   const weekDates = getWeekDates(weekPick)
 
-  const taskParams: RunOrderTaskParams = {
-    openid,
-    weekPick,
-    selectedWeekdays,
-    selectedMealTypes,
-    matchMode,
-    keywords,
-    stockThreshold
-  }
+  const getTaskParams = useCallback((): RunOrderTaskParams => {
+    const stockThreshold = matchMode === 'stock' ? (parseStockThreshold(stockThresholdInput) ?? 0) : 0
+    return {
+      openid,
+      weekPick,
+      selectedWeekdays,
+      selectedMealTypes,
+      matchMode,
+      keywords,
+      stockThreshold
+    }
+  }, [openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdInput])
 
   const startGrab = useCallback(async () => {
     if (selectedWeekdays.length === 0) {
@@ -212,11 +230,18 @@ function App() {
       setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
       return
     }
+    if (matchMode === 'stock') {
+      const parsed = parseStockThreshold(stockThresholdInput)
+      if (parsed === null) {
+        setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
+        return
+      }
+    }
     setLoading(true)
     setStatus({ type: 'idle', msg: '' })
     setRunResults([])
     try {
-      const results = await runOrderTask(taskParams, setRunResults)
+      const results = await runOrderTask(getTaskParams(), setRunResults)
       const ordered = results.filter((r) => r.status === 'ordered').length
       const noMatch = results.filter((r) => r.status === 'no_match').length
       const err = results.filter((r) => r.status === 'error').length
@@ -226,7 +251,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [openid, matchMode, keywords, stockThreshold, weekPick, selectedWeekdays, selectedMealTypes])
+  }, [openid, matchMode, keywords, stockThresholdInput, weekPick, selectedWeekdays, selectedMealTypes, getTaskParams])
 
   const stopMonitor = useCallback(() => {
     if (monitorIntervalRef.current) {
@@ -249,6 +274,16 @@ function App() {
       setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
       return
     }
+    if (matchMode === 'stock' && parseStockThreshold(stockThresholdInput) === null) {
+      setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
+      return
+    }
+    const intervalSeconds = parseMonitorIntervalSeconds(monitorIntervalInput)
+    if (intervalSeconds === null) {
+      setStatus({ type: 'error', msg: '请输入有效的监控间隔（≥1 的整数，单位秒）' })
+      return
+    }
+    const monitorIntervalMs = intervalSeconds * 1000
     const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
     const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
     const probeDayIndex = sortedDays[0]
@@ -257,10 +292,10 @@ function App() {
     const probeDateLabel = getWeekdayLabel(probeDayIndex)
     const probeMealLabel = MEAL_OPTIONS.find((o) => o.value === probeMealType)?.label ?? ''
 
-    monitorParamsRef.current = { ...taskParams }
+    monitorParamsRef.current = getTaskParams()
     setIsMonitoring(true)
     setRunResults([])
-    setStatus({ type: 'idle', msg: `监控中，每 ${MONITOR_INTERVAL_MS / 1000}s 探测 ${probeDateLabel} ${probeMealLabel}…` })
+    setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}…` })
 
     const doProbe = async () => {
       const params = monitorParamsRef.current
@@ -291,13 +326,13 @@ function App() {
     }
 
     doProbe()
-    monitorIntervalRef.current = setInterval(doProbe, MONITOR_INTERVAL_MS)
-  }, [openid, matchMode, keywords, stockThreshold, weekPick, selectedWeekdays, selectedMealTypes, weekDates, stopMonitor])
+    monitorIntervalRef.current = setInterval(doProbe, monitorIntervalMs)
+  }, [openid, matchMode, keywords, stockThresholdInput, monitorIntervalInput, weekPick, selectedWeekdays, selectedMealTypes, weekDates, stopMonitor, getTaskParams])
 
   useEffect(() => {
     if (!isMonitoring) return
-    monitorParamsRef.current = { ...taskParams }
-  }, [isMonitoring, openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold])
+    monitorParamsRef.current = getTaskParams()
+  }, [isMonitoring, getTaskParams])
 
   useEffect(() => {
     return () => {
@@ -351,15 +386,16 @@ function App() {
         )}
         {matchMode === 'stock' && (
           <>
-            <label htmlFor="stockThreshold">总量低于（stockCount &lt; 此值则选中该套餐）</label>
+            <label htmlFor="stockThreshold">总量（stockCount ≤ 此值则选中该套餐）</label>
             <input
               id="stockThreshold"
-              type="number"
-              min={1}
-              value={stockThreshold}
-              onChange={(e) => setStockThreshold(Number(e.target.value) || 0)}
+              type="text"
+              inputMode="numeric"
+              value={stockThresholdInput}
+              onChange={(e) => setStockThresholdInput(e.target.value)}
+              placeholder="如 200"
             />
-            <p className="input-hint">只选中总量小于该数值的第一个套餐，如 200 表示抢“总量在 200 以下”的饭</p>
+            <p className="input-hint">选中总量 ≤ 该数值的第一个套餐；如 200 表示抢“总量在 200份 及以下”的饭</p>
           </>
         )}
         <div style={{ marginTop: '1rem' }}>
@@ -416,6 +452,19 @@ function App() {
             订餐周：{weekDates[0]} ～ {weekDates[6]}（周一～周日）
           </p>
         </div>
+        <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'flex-end', gap: '0.75rem' }}>
+          <div style={{ flex: '0 0 8rem' }}>
+            <label htmlFor="monitorInterval">监控间隔（秒）</label>
+            <input
+              id="monitorInterval"
+              type="text"
+              inputMode="numeric"
+              value={monitorIntervalInput}
+              onChange={(e) => setMonitorIntervalInput(e.target.value)}
+              placeholder="如 10"
+            />
+          </div>
+        </div>
         <div className="action-row">
           <button
             type="button"
@@ -445,7 +494,7 @@ function App() {
           )}
         </div>
         <p className="input-hint" style={{ marginTop: '0.5rem' }}>
-          监控模式：每 10s 探测一次菜单（仅探测所选的第一天第一餐，一周菜单同时更新）；有数据后自动执行点餐并展示结果。某餐仍为空时该餐记「暂无菜单」并继续其余任务。
+          监控模式：按上面设置的间隔（秒）探测菜单（仅探测所选的第一天第一餐，一周菜单同时更新）；有数据后自动执行点餐并展示结果。某餐仍为空时该餐记「暂无菜单」并继续其余任务。
         </p>
       </section>
 
