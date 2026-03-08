@@ -153,6 +153,22 @@ textarea {
   transform: scale(0.98);
 }
 
+.action-row {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.action-row .btn-primary {
+  flex: 1;
+  margin-top: 0;
+}
+
+.action-row .btn-secondary {
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
 .btn-primary {
   background: var(--accent);
   color: #fff;

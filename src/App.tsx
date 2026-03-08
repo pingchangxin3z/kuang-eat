@@ -1,7 +1,9 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { getMenu, createOrder } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
+
+const MONITOR_INTERVAL_MS = 10_000
 
 const OPENID_KEY = 'kuang-eat-openid'
 
@@ -15,8 +17,8 @@ const MEAL_OPTIONS: { value: 1 | 2 | 3; label: string }[] = [
   { value: 3, label: '晚餐' }
 ]
 
-/** 周一～周五，对应 weekDates 的 index 0～4 */
-const WEEKDAY_OPTIONS = [0, 1, 2, 3, 4].map((i) => ({
+/** 周一～周日，对应 weekDates 的 index 0～6；全选仅选周一～周五 */
+const WEEKDAY_OPTIONS = [0, 1, 2, 3, 4, 5, 6].map((i) => ({
   value: i,
   label: getWeekdayLabel(i)
 }))
@@ -38,6 +40,103 @@ interface RunDayResult {
   packageName?: string
 }
 
+/** 点餐任务参数（与菜单是否为空无关：某餐为空则记 no_match 并继续下一餐） */
+interface RunOrderTaskParams {
+  openid: string
+  weekPick: string
+  selectedWeekdays: number[]
+  selectedMealTypes: (1 | 2 | 3)[]
+  matchMode: 'keywords' | 'stock'
+  keywords: string
+  stockThreshold: number
+}
+
+/** 执行完整点餐任务，返回每条结果；某餐 data 为空时记暂无菜单并继续 */
+async function runOrderTask(
+  params: RunOrderTaskParams,
+  onProgress?: (results: RunDayResult[]) => void
+): Promise<RunDayResult[]> {
+  const { openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold } = params
+  const weekDates = getWeekDates(weekPick)
+  const kw = parseKeywords(keywords)
+  const results: RunDayResult[] = []
+  const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
+  const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
+
+  for (const dayIndex of sortedDays) {
+    const dateStr = weekDates[dayIndex]
+    const dateLabel = getWeekdayLabel(dayIndex)
+    const ymd = toMealDate(dateStr)
+    for (const mealType of sortedMealTypes) {
+      const mealTypeLabel = MEAL_OPTIONS.find((o) => o.value === mealType)?.label ?? ''
+      try {
+        const res = await getMenu(mealType, ymd, openid)
+        const list = res.data ?? []
+        const matched =
+          matchMode === 'keywords'
+            ? matchFirstMenuItem(list, kw)
+            : matchFirstByStockCount(list, stockThreshold)
+        if (matched) {
+          const orderRes = await createOrder(
+            {
+              mealType: String(matched.mealType),
+              orderDate: String(matched.mealDate),
+              packageName: matched.packageName,
+              sequenceChar: matched.sequenceChar
+            },
+            openid
+          )
+          if (orderRes.code === 200) {
+            results.push({
+              date: dateStr,
+              dateLabel,
+              mealType,
+              mealTypeLabel,
+              status: 'ordered',
+              message: orderRes.msg ?? '已下单',
+              packageName: matched.packageName.replace(/\n/g, ' ')
+            })
+          } else {
+            results.push({
+              date: dateStr,
+              dateLabel,
+              mealType,
+              mealTypeLabel,
+              status: 'error',
+              message: orderRes.msg ?? '下单失败'
+            })
+          }
+        } else {
+          const noMatchMsg =
+            matchMode === 'keywords'
+              ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
+              : (list.length === 0 ? '暂无菜单' : `无总量 < ${stockThreshold} 的套餐`)
+          results.push({
+            date: dateStr,
+            dateLabel,
+            mealType,
+            mealTypeLabel,
+            status: 'no_match',
+            message: noMatchMsg
+          })
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '请求失败'
+        results.push({
+          date: dateStr,
+          dateLabel,
+          mealType,
+          mealTypeLabel,
+          status: 'error',
+          message: msg
+        })
+      }
+      onProgress?.([...results])
+    }
+  }
+  return results
+}
+
 function App() {
   const [openid, setOpenid] = useState(() => {
     try {
@@ -56,8 +155,11 @@ function App() {
   })
   const [selectedWeekdays, setSelectedWeekdays] = useState<number[]>([0, 1, 2, 3, 4])
   const [loading, setLoading] = useState(false)
+  const [isMonitoring, setIsMonitoring] = useState(false)
   const [runResults, setRunResults] = useState<RunDayResult[]>([])
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
+  const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
 
   const saveOpenid = useCallback((v: string) => {
     setOpenid(v)
@@ -74,6 +176,7 @@ function App() {
     )
   }, [])
 
+  /** 全选仅选周一～周五，不包含周六日 */
   const selectAllWeekdays = useCallback(() => {
     setSelectedWeekdays([0, 1, 2, 3, 4])
   }, [])
@@ -90,6 +193,16 @@ function App() {
 
   const weekDates = getWeekDates(weekPick)
 
+  const taskParams: RunOrderTaskParams = {
+    openid,
+    weekPick,
+    selectedWeekdays,
+    selectedMealTypes,
+    matchMode,
+    keywords,
+    stockThreshold
+  }
+
   const startGrab = useCallback(async () => {
     if (selectedWeekdays.length === 0) {
       setStatus({ type: 'error', msg: '请至少选择一天（周一～周五）' })
@@ -102,91 +215,95 @@ function App() {
     setLoading(true)
     setStatus({ type: 'idle', msg: '' })
     setRunResults([])
-    const kw = parseKeywords(keywords)
-    const results: RunDayResult[] = []
+    try {
+      const results = await runOrderTask(taskParams, setRunResults)
+      const ordered = results.filter((r) => r.status === 'ordered').length
+      const noMatch = results.filter((r) => r.status === 'no_match').length
+      const err = results.filter((r) => r.status === 'error').length
+      if (ordered > 0) setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
+      else if (err > 0) setStatus({ type: 'error', msg: `无下单成功，${err} 单失败` })
+      else setStatus({ type: 'idle', msg: '全部未匹配' })
+    } finally {
+      setLoading(false)
+    }
+  }, [openid, matchMode, keywords, stockThreshold, weekPick, selectedWeekdays, selectedMealTypes])
+
+  const stopMonitor = useCallback(() => {
+    if (monitorIntervalRef.current) {
+      clearInterval(monitorIntervalRef.current)
+      monitorIntervalRef.current = null
+    }
+    setIsMonitoring(false)
+  }, [])
+
+  const startMonitor = useCallback(() => {
+    if (!openid.trim()) {
+      setStatus({ type: 'error', msg: '请先填写 OpenID' })
+      return
+    }
+    if (selectedWeekdays.length === 0) {
+      setStatus({ type: 'error', msg: '请至少选择一天（周一～周五）' })
+      return
+    }
+    if (selectedMealTypes.length === 0) {
+      setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
+      return
+    }
     const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
     const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
+    const probeDayIndex = sortedDays[0]
+    const probeMealType = sortedMealTypes[0]
+    const probeDateStr = weekDates[probeDayIndex]
+    const probeDateLabel = getWeekdayLabel(probeDayIndex)
+    const probeMealLabel = MEAL_OPTIONS.find((o) => o.value === probeMealType)?.label ?? ''
 
-    for (const dayIndex of sortedDays) {
-      const dateStr = weekDates[dayIndex]
-      const dateLabel = getWeekdayLabel(dayIndex)
-      const ymd = toMealDate(dateStr)
-      for (const mealType of sortedMealTypes) {
-        const mealTypeLabel = MEAL_OPTIONS.find((o) => o.value === mealType)?.label ?? ''
-        try {
-          const res = await getMenu(mealType, ymd, openid)
-          const list = res.data ?? []
-          const matched =
-            matchMode === 'keywords'
-              ? matchFirstMenuItem(list, kw)
-              : matchFirstByStockCount(list, stockThreshold)
-          if (matched) {
-            const orderRes = await createOrder(
-              {
-                mealType: String(matched.mealType),
-                orderDate: String(matched.mealDate),
-                packageName: matched.packageName,
-                sequenceChar: matched.sequenceChar
-              },
-              openid
-            )
-            if (orderRes.code === 200) {
-              results.push({
-                date: dateStr,
-                dateLabel,
-                mealType,
-                mealTypeLabel,
-                status: 'ordered',
-                message: orderRes.msg ?? '已下单',
-                packageName: matched.packageName.replace(/\n/g, ' ')
-              })
-            } else {
-              results.push({
-                date: dateStr,
-                dateLabel,
-                mealType,
-                mealTypeLabel,
-                status: 'error',
-                message: orderRes.msg ?? '下单失败'
-              })
-            }
-          } else {
-            const noMatchMsg =
-              matchMode === 'keywords'
-                ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-                : (list.length === 0 ? '暂无菜单' : `无总量 < ${stockThreshold} 的套餐`)
-            results.push({
-              date: dateStr,
-              dateLabel,
-              mealType,
-              mealTypeLabel,
-              status: 'no_match',
-              message: noMatchMsg
-            })
+    monitorParamsRef.current = { ...taskParams }
+    setIsMonitoring(true)
+    setRunResults([])
+    setStatus({ type: 'idle', msg: `监控中，每 ${MONITOR_INTERVAL_MS / 1000}s 探测 ${probeDateLabel} ${probeMealLabel}…` })
+
+    const doProbe = async () => {
+      const params = monitorParamsRef.current
+      if (!params) return
+      try {
+        const ymd = toMealDate(probeDateStr)
+        const res = await getMenu(probeMealType, ymd, params.openid)
+        const list = res.data ?? []
+        if (list.length > 0) {
+          stopMonitor()
+          setStatus({ type: 'idle', msg: '已检测到菜单，正在执行点餐…' })
+          setLoading(true)
+          try {
+            const results = await runOrderTask(params, setRunResults)
+            const ordered = results.filter((r) => r.status === 'ordered').length
+            const noMatch = results.filter((r) => r.status === 'no_match').length
+            const err = results.filter((r) => r.status === 'error').length
+            if (ordered > 0) setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
+            else if (err > 0) setStatus({ type: 'error', msg: `无下单成功，${err} 单失败` })
+            else setStatus({ type: 'idle', msg: '全部未匹配' })
+          } finally {
+            setLoading(false)
           }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : '请求失败'
-          results.push({
-            date: dateStr,
-            dateLabel,
-            mealType,
-            mealTypeLabel,
-            status: 'error',
-            message: msg
-          })
         }
-        setRunResults([...results])
+      } catch {
+        // 本次探测失败，等下一轮
       }
     }
 
-    setLoading(false)
-    const ordered = results.filter((r) => r.status === 'ordered').length
-    const noMatch = results.filter((r) => r.status === 'no_match').length
-    const err = results.filter((r) => r.status === 'error').length
-    if (ordered > 0) setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
-    else if (err > 0) setStatus({ type: 'error', msg: `无下单成功，${err} 单失败` })
-    else setStatus({ type: 'idle', msg: `全部未匹配` })
-  }, [openid, matchMode, keywords, stockThreshold, weekPick, selectedWeekdays, selectedMealTypes, weekDates])
+    doProbe()
+    monitorIntervalRef.current = setInterval(doProbe, MONITOR_INTERVAL_MS)
+  }, [openid, matchMode, keywords, stockThreshold, weekPick, selectedWeekdays, selectedMealTypes, weekDates, stopMonitor])
+
+  useEffect(() => {
+    if (!isMonitoring) return
+    monitorParamsRef.current = { ...taskParams }
+  }, [isMonitoring, openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold])
+
+  useEffect(() => {
+    return () => {
+      if (monitorIntervalRef.current) clearInterval(monitorIntervalRef.current)
+    }
+  }, [])
 
   return (
     <>
@@ -299,14 +416,37 @@ function App() {
             订餐周：{weekDates[0]} ～ {weekDates[6]}（周一～周日）
           </p>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={startGrab}
-          disabled={loading}
-        >
-          {loading ? '抢饭中…' : '开始抢饭'}
-        </button>
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={startGrab}
+            disabled={loading || isMonitoring}
+          >
+            {loading ? '抢饭中…' : '开始抢饭'}
+          </button>
+          {!isMonitoring ? (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={startMonitor}
+              disabled={loading}
+            >
+              开始监控
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={stopMonitor}
+            >
+              停止监控
+            </button>
+          )}
+        </div>
+        <p className="input-hint" style={{ marginTop: '0.5rem' }}>
+          监控模式：每 10s 探测一次菜单（仅探测所选的第一天第一餐，一周菜单同时更新）；有数据后自动执行点餐并展示结果。某餐仍为空时该餐记「暂无菜单」并继续其余任务。
+        </p>
       </section>
 
       {runResults.length > 0 && (
