@@ -4,7 +4,6 @@ import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/uti
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
 
 const OPENID_KEY = 'kuang-eat-openid'
-const DEFAULT_OPENID = 'ou_66c42c8cf53b96ecd83555138ed5c1df'
 
 function toMealDate(dateStr: string): string {
   return dateStr ? dateStr.replace(/-/g, '') : ''
@@ -42,9 +41,9 @@ interface RunDayResult {
 function App() {
   const [openid, setOpenid] = useState(() => {
     try {
-      return localStorage.getItem(OPENID_KEY) || DEFAULT_OPENID
+      return localStorage.getItem(OPENID_KEY) ?? ''
     } catch {
-      return DEFAULT_OPENID
+      return ''
     }
   })
   const [matchMode, setMatchMode] = useState<'keywords' | 'stock'>('keywords')
