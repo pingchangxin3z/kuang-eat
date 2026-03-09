@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/feishu-api/:path*",
+      "destination": "https://order.hersweetie.com/feishu-api/:path*"
+    }
+  ]
+}
