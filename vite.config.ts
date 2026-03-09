@@ -10,7 +10,7 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
+    port: 4173,
     proxy: {
       '/feishu-api': {
         target: 'https://order.hersweetie.com',

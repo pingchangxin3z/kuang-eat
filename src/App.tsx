@@ -65,7 +65,7 @@ interface RunOrderTaskParams {
   stockThreshold: number
 }
 
-/** 执行完整点餐任务，返回每条结果；某餐 data 为空时记暂无菜单并继续 */
+/** 执行完整点餐任务，返回每条结果；先并行拉取所有菜单，再按顺序匹配与下单以缩短总耗时 */
 async function runOrderTask(
   params: RunOrderTaskParams,
   onProgress?: (results: RunDayResult[]) => void
@@ -73,80 +73,87 @@ async function runOrderTask(
   const { openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold } = params
   const weekDates = getWeekDates(weekPick)
   const kw = parseKeywords(keywords)
-  const results: RunDayResult[] = []
   const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
   const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
 
+  const tasks: { dayIndex: number; dateStr: string; dateLabel: string; mealType: 1 | 2 | 3; mealTypeLabel: string }[] = []
   for (const dayIndex of sortedDays) {
     const dateStr = weekDates[dayIndex]
     const dateLabel = getWeekdayLabel(dayIndex)
-    const ymd = toMealDate(dateStr)
     for (const mealType of sortedMealTypes) {
       const mealTypeLabel = MEAL_OPTIONS.find((o) => o.value === mealType)?.label ?? ''
+      tasks.push({ dayIndex, dateStr, dateLabel, mealType, mealTypeLabel })
+    }
+  }
+
+  const menuResults = await Promise.all(
+    tasks.map(async (t) => {
       try {
-        const res = await getMenu(mealType, ymd, openid)
-        const list = res.data ?? []
-        const matched =
-          matchMode === 'keywords'
-            ? matchFirstMenuItem(list, kw)
-            : matchFirstByStockCount(list, stockThreshold)
-        if (matched) {
-          const orderRes = await createOrder(
-            {
-              mealType: String(matched.mealType),
-              orderDate: String(matched.mealDate),
-              packageName: matched.packageName,
-              sequenceChar: matched.sequenceChar
-            },
-            openid
-          )
-          if (orderRes.code === 200) {
-            results.push({
-              date: dateStr,
-              dateLabel,
-              mealType,
-              mealTypeLabel,
-              status: 'ordered',
-              message: orderRes.msg ?? '已下单',
-              packageName: matched.packageName.replace(/\n/g, ' ')
-            })
-          } else {
-            results.push({
-              date: dateStr,
-              dateLabel,
-              mealType,
-              mealTypeLabel,
-              status: 'error',
-              message: orderRes.msg ?? '下单失败'
-            })
-          }
-        } else {
-          const noMatchMsg =
-            matchMode === 'keywords'
-              ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-              : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${stockThreshold} 的套餐`)
+        const res = await getMenu(t.mealType, toMealDate(t.dateStr), openid)
+        return { ...t, list: res.data ?? [] }
+      } catch {
+        return { ...t, list: [] }
+      }
+    })
+  )
+
+  const results: RunDayResult[] = []
+  for (const item of menuResults) {
+    const { dateStr, dateLabel, mealType, mealTypeLabel, list } = item
+    const matched =
+      matchMode === 'keywords'
+        ? matchFirstMenuItem(list, kw)
+        : matchFirstByStockCount(list, stockThreshold)
+    if (matched) {
+      try {
+        const orderRes = await createOrder(
+          {
+            mealType: String(matched.mealType),
+            orderDate: String(matched.mealDate),
+            packageName: matched.packageName,
+            sequenceChar: matched.sequenceChar
+          },
+          openid
+        )
+        if (orderRes.code === 200) {
           results.push({
             date: dateStr,
             dateLabel,
             mealType,
             mealTypeLabel,
-            status: 'no_match',
-            message: noMatchMsg
+            status: 'ordered',
+            message: orderRes.msg ?? '已下单',
+            packageName: matched.packageName.replace(/\n/g, ' ')
+          })
+        } else {
+          results.push({
+            date: dateStr,
+            dateLabel,
+            mealType,
+            mealTypeLabel,
+            status: 'error',
+            message: orderRes.msg ?? '下单失败'
           })
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : '请求失败'
-        results.push({
-          date: dateStr,
-          dateLabel,
-          mealType,
-          mealTypeLabel,
-          status: 'error',
-          message: msg
-        })
+        results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'error', message: msg })
       }
-      onProgress?.([...results])
+    } else {
+      const noMatchMsg =
+        matchMode === 'keywords'
+          ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
+          : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${stockThreshold} 的套餐`)
+      results.push({
+        date: dateStr,
+        dateLabel,
+        mealType,
+        mealTypeLabel,
+        status: 'no_match',
+        message: noMatchMsg
+      })
     }
+    onProgress?.([...results])
   }
   return results
 }
@@ -375,12 +382,12 @@ function App() {
         </div>
         {matchMode === 'keywords' && (
           <>
-            <label htmlFor="keywords">关键词（多个用逗号/空格分隔，匹配到第一个即下单）</label>
+            <label htmlFor="keywords">关键词（多个用逗号/空格/回车/顿号分隔，匹配到第一个即下单）</label>
             <textarea
               id="keywords"
               value={keywords}
               onChange={(e) => setKeywords(e.target.value)}
-              placeholder="例：金谷园、麦当劳、香肠"
+              placeholder="例：金谷园、达美乐、好开心"
             />
           </>
         )}
