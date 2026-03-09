@@ -393,7 +393,7 @@ function App() {
         )}
         {matchMode === 'stock' && (
           <>
-            <label htmlFor="stockThreshold">总量（stockCount ≤ 此值则选中该套餐）</label>
+            <label htmlFor="stockThreshold">总量 ≤ 此值则选中该套餐</label>
             <input
               id="stockThreshold"
               type="text"
