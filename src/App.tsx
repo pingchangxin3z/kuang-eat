@@ -166,10 +166,10 @@ function App() {
       return ''
     }
   })
-  const [matchMode, setMatchMode] = useState<'keywords' | 'stock'>('keywords')
+  const [matchMode, setMatchMode] = useState<'keywords' | 'stock'>('stock')
   const [keywords, setKeywords] = useState('金谷园')
   const [stockThresholdInput, setStockThresholdInput] = useState('200')
-  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([2])
+  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([1, 2, 3])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
     const day = d.getDay()
