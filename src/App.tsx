@@ -266,6 +266,7 @@ function App() {
       monitorIntervalRef.current = null
     }
     setIsMonitoring(false)
+    setStatus({ type: 'idle', msg: '' })
   }, [])
 
   const startMonitor = useCallback(() => {
@@ -326,9 +327,11 @@ function App() {
           } finally {
             setLoading(false)
           }
+        } else {
+          setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}，暂无菜单` })
         }
       } catch {
-        // 本次探测失败，等下一轮
+        setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}，请求失败` })
       }
     }
 
