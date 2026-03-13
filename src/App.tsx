@@ -172,6 +172,9 @@ function App() {
   const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([2])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
+    const day = d.getDay()
+    const daysToAdd = day === 1 ? 7 : (8 - day) % 7
+    d.setDate(d.getDate() + daysToAdd)
     return d.toISOString().slice(0, 10)
   })
   const [selectedWeekdays, setSelectedWeekdays] = useState<number[]>([0, 1, 2, 3, 4])
@@ -179,7 +182,7 @@ function App() {
   const [isMonitoring, setIsMonitoring] = useState(false)
   const [runResults, setRunResults] = useState<RunDayResult[]>([])
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
-  const [monitorIntervalInput, setMonitorIntervalInput] = useState('5')
+  const [monitorIntervalInput, setMonitorIntervalInput] = useState('3')
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
 
