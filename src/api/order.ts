@@ -1,8 +1,15 @@
-import type { MenuListResponse, CreateOrderBody } from '@/types/order'
+import type {
+  MenuListResponse,
+  CreateOrderBody,
+  AddressListResponse,
+  TransferPoolListBody,
+  TransferPoolListResponse
+} from '@/types/order'
 
 /** 开发时走 Vite 反向代理，避免 CORS；生产若部署同域可继续用相对路径 */
 const BASE = ''
 const REFERRER = 'https://order.hersweetie.com/feishu/order/work'
+const REFERRER_TRANSFER = 'https://order.hersweetie.com/feishu/transferPool'
 
 function defaultHeaders(openid: string, contentType?: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -43,21 +50,78 @@ export async function getMenu(
   return data
 }
 
-/** 固定配送地址（与文档一致） */
-const ADDRESS_ID = 118
-const ADDRESS_DETAIL = '8层西侧吧台'
+/** 默认配送地址（未选地址时使用） */
+const DEFAULT_ADDRESS_ID = 118
+const DEFAULT_ADDRESS_DETAIL = '8层西侧吧台'
 
 /**
- * 提交下单
+ * 获取地址列表
+ */
+export async function getAddressList(openid: string): Promise<AddressListResponse> {
+  const res = await fetch(`${BASE}/feishu-api/address/list`, {
+    method: 'GET',
+    headers: defaultHeaders(openid),
+    referrer: REFERRER_TRANSFER,
+    mode: 'cors',
+    credentials: 'include'
+  })
+  const data = (await res.json()) as AddressListResponse
+  if (data.code !== 200) throw new Error(data.msg || '获取地址列表失败')
+  return data
+}
+
+/**
+ * 获取转让池列表
+ */
+export async function getTransferPoolList(
+  openid: string,
+  body: TransferPoolListBody
+): Promise<TransferPoolListResponse> {
+  const res = await fetch(`${BASE}/feishu-api/v2/transferpool/list`, {
+    method: 'POST',
+    headers: defaultHeaders(openid, 'application/json;charset=UTF-8'),
+    referrer: REFERRER_TRANSFER,
+    mode: 'cors',
+    credentials: 'include',
+    body: JSON.stringify(body)
+  })
+  const data = (await res.json()) as TransferPoolListResponse
+  if (data.code !== 200) throw new Error(data.msg || '获取转让池列表失败')
+  return data
+}
+
+/**
+ * 领取转让池的餐（根据 orderId）
+ */
+export async function obtainTransferOrder(
+  openid: string,
+  orderId: number
+): Promise<{ code: number; msg: string }> {
+  const url = `${BASE}/feishu-api/v2/transferpool/obtainOrder?orderId=${orderId}`
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: defaultHeaders(openid),
+    referrer: REFERRER_TRANSFER,
+    mode: 'cors',
+    credentials: 'include'
+  })
+  const data = (await res.json()) as { code: number; msg: string }
+  return data
+}
+
+/**
+ * 提交下单（addressId/addressDetail 不传时使用默认地址）
  */
 export async function createOrder(
   body: Omit<CreateOrderBody, 'addressId' | 'addressDetail'>,
-  openid: string
+  openid: string,
+  addressId: number = DEFAULT_ADDRESS_ID,
+  addressDetail: string = DEFAULT_ADDRESS_DETAIL
 ): Promise<{ code: number; msg: string }> {
   const payload: CreateOrderBody = {
     ...body,
-    addressId: ADDRESS_ID,
-    addressDetail: ADDRESS_DETAIL
+    addressId,
+    addressDetail
   }
   const res = await fetch(`${BASE}/feishu-api/order/create`, {
     method: 'POST',

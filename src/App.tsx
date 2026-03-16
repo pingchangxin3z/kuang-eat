@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { getMenu, createOrder } from '@/api/order'
+import { getMenu, createOrder, getAddressList, getTransferPoolList, obtainTransferOrder } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
+import type { AddressItem, TransferPoolItem } from '@/types/order'
 
 const OPENID_KEY = 'kuang-eat-openid'
 
@@ -63,6 +64,8 @@ interface RunOrderTaskParams {
   matchMode: 'keywords' | 'stock'
   keywords: string
   stockThreshold: number
+  addressId: number
+  addressDetail: string
 }
 
 /** 执行完整点餐任务，返回每条结果；先并行拉取所有菜单，再按顺序匹配与下单以缩短总耗时 */
@@ -70,7 +73,7 @@ async function runOrderTask(
   params: RunOrderTaskParams,
   onProgress?: (results: RunDayResult[]) => void
 ): Promise<RunDayResult[]> {
-  const { openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold } = params
+  const { openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold, addressId, addressDetail } = params
   const weekDates = getWeekDates(weekPick)
   const kw = parseKeywords(keywords)
   const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
@@ -113,7 +116,9 @@ async function runOrderTask(
             packageName: matched.packageName,
             sequenceChar: matched.sequenceChar
           },
-          openid
+          openid,
+          addressId,
+          addressDetail
         )
         if (orderRes.code === 200) {
           results.push({
@@ -185,6 +190,14 @@ function App() {
   const [monitorIntervalInput, setMonitorIntervalInput] = useState('3')
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
+  const [addressList, setAddressList] = useState<AddressItem[]>([])
+  const [selectedAddressId, setSelectedAddressId] = useState<number | null>(118)
+  const [transferPoolDate, setTransferPoolDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [transferPoolMealType, setTransferPoolMealType] = useState<string>('')
+  const [transferPoolAddressId, setTransferPoolAddressId] = useState<string>('')
+  const [transferPoolList, setTransferPoolList] = useState<TransferPoolItem[]>([])
+  const [transferPoolLoading, setTransferPoolLoading] = useState(false)
+  const [obtainingOrderId, setObtainingOrderId] = useState<number | null>(null)
 
   const saveOpenid = useCallback((v: string) => {
     setOpenid(v)
@@ -218,6 +231,7 @@ function App() {
 
   const weekDates = getWeekDates(weekPick)
 
+  const selectedAddress = addressList.find((a) => a.id === selectedAddressId)
   const getTaskParams = useCallback((): RunOrderTaskParams => {
     const stockThreshold = matchMode === 'stock' ? (parseStockThreshold(stockThresholdInput) ?? 0) : 0
     return {
@@ -227,9 +241,70 @@ function App() {
       selectedMealTypes,
       matchMode,
       keywords,
-      stockThreshold
+      stockThreshold,
+      addressId: selectedAddress?.id ?? 118,
+      addressDetail: selectedAddress?.detailAddress ?? '8层西侧吧台'
     }
-  }, [openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdInput])
+  }, [openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdInput, selectedAddress])
+
+  useEffect(() => {
+    if (!openid.trim()) {
+      setAddressList([])
+      return
+    }
+    getAddressList(openid)
+      .then((res) => setAddressList(res.data ?? []))
+      .catch(() => setAddressList([]))
+  }, [openid])
+
+  const fetchTransferPool = useCallback(async () => {
+    if (!openid.trim()) {
+      setStatus({ type: 'error', msg: '请先填写 OpenID' })
+      return
+    }
+    setTransferPoolLoading(true)
+    setTransferPoolList([])
+    try {
+      const orderDate = transferPoolDate.replace(/-/g, '')
+      const res = await getTransferPoolList(openid, {
+        orderDate,
+        mealType: transferPoolMealType || undefined,
+        addressId: transferPoolAddressId || undefined
+      })
+      setTransferPoolList(res.data ?? [])
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '获取转让池失败'
+      setStatus({ type: 'error', msg })
+    } finally {
+      setTransferPoolLoading(false)
+    }
+  }, [openid, transferPoolDate, transferPoolMealType, transferPoolAddressId])
+
+  const handleObtainTransfer = useCallback(
+    async (orderId: number) => {
+      if (!openid.trim()) {
+        setStatus({ type: 'error', msg: '请先填写 OpenID' })
+        return
+      }
+      setObtainingOrderId(orderId)
+      setStatus({ type: 'idle', msg: '' })
+      try {
+        const res = await obtainTransferOrder(openid, orderId)
+        if (res.code === 200) {
+          setStatus({ type: 'success', msg: res.msg ?? '领取成功' })
+          setTransferPoolList((prev) => prev.filter((item) => item.orderId !== orderId))
+        } else {
+          setStatus({ type: 'error', msg: res.msg ?? '领取失败' })
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : '领取请求失败'
+        setStatus({ type: 'error', msg })
+      } finally {
+        setObtainingOrderId(null)
+      }
+    },
+    [openid]
+  )
 
   const startGrab = useCallback(async () => {
     if (selectedWeekdays.length === 0) {
@@ -368,6 +443,24 @@ function App() {
           onChange={(e) => saveOpenid(e.target.value)}
           placeholder="用于请求接口的 openid"
         />
+        <div style={{ marginTop: '1rem' }}>
+          <label htmlFor="address">配送地址（下单时使用）</label>
+          <select
+            id="address"
+            value={selectedAddressId ?? ''}
+            onChange={(e) => setSelectedAddressId(e.target.value === '' ? null : Number(e.target.value))}
+          >
+            <option value={118}>8层西侧吧台（默认）</option>
+            {addressList.filter((a) => a.id !== 118).map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.detailAddress}
+              </option>
+            ))}
+          </select>
+          {addressList.length === 0 && openid.trim() && (
+            <p className="input-hint">加载中…</p>
+          )}
+        </div>
       </section>
 
       <section className="section">
@@ -509,6 +602,94 @@ function App() {
         <p className="input-hint" style={{ marginTop: '0.5rem' }}>
           监控模式：按上面设置的间隔（秒）探测菜单（仅探测所选的第一天第一餐，一周菜单同时更新）；有数据后自动执行点餐并展示结果。某餐仍为空时该餐记「暂无菜单」并继续其余任务。
         </p>
+      </section>
+
+      <section className="section">
+        <h2 className="section-title">转让池</h2>
+        <p className="input-hint" style={{ marginTop: 0, marginBottom: '0.75rem' }}>
+          按日期、餐次、地址筛选转让池列表；点击「领取」可获取该转让餐。
+        </p>
+        <div className="row" style={{ marginBottom: '0.75rem' }}>
+          <div>
+            <label>日期</label>
+            <input
+              type="date"
+              value={transferPoolDate}
+              onChange={(e) => setTransferPoolDate(e.target.value)}
+            />
+          </div>
+          <div>
+            <label>餐次</label>
+            <select
+              value={transferPoolMealType}
+              onChange={(e) => setTransferPoolMealType(e.target.value)}
+            >
+              <option value="">全部</option>
+              {MEAL_OPTIONS.map((o) => (
+                <option key={o.value} value={String(o.value)}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div style={{ marginBottom: '0.75rem' }}>
+          <label>地址</label>
+          <select
+            value={transferPoolAddressId}
+            onChange={(e) => setTransferPoolAddressId(e.target.value)}
+          >
+            <option value="">全部</option>
+            {addressList.map((a) => (
+              <option key={a.id} value={String(a.id)}>{a.detailAddress}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={fetchTransferPool}
+          disabled={transferPoolLoading}
+        >
+          {transferPoolLoading ? '查询中…' : '查询转让池'}
+        </button>
+        {transferPoolList.length > 0 && (
+          <div className="transfer-pool-table-wrap">
+            <table className="transfer-pool-table">
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>餐次</th>
+                  <th>套餐</th>
+                  <th>转让人</th>
+                  <th>部门</th>
+                  <th>地址</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transferPoolList.map((item) => (
+                  <tr key={item.id}>
+                    <td>{String(item.orderDate)}</td>
+                    <td>{MEAL_OPTIONS.find((o) => o.value === item.mealType)?.label ?? item.mealType}</td>
+                    <td className="transfer-pool-package">{item.packageName.replace(/\n/g, ' ')}</td>
+                    <td>{item.userName}</td>
+                    <td>{item.department}</td>
+                    <td>{item.addressDetail}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-chip"
+                        onClick={() => handleObtainTransfer(item.orderId)}
+                        disabled={obtainingOrderId !== null}
+                      >
+                        {obtainingOrderId === item.orderId ? '领取中…' : '领取'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {runResults.length > 0 && (

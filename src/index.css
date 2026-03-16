@@ -336,6 +336,35 @@ textarea {
   color: var(--error);
 }
 
+/* 转让池表格 */
+.transfer-pool-table-wrap {
+  margin-top: 1rem;
+  overflow-x: auto;
+}
+
+.transfer-pool-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.transfer-pool-table th,
+.transfer-pool-table td {
+  padding: 0.5rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.transfer-pool-table th {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.transfer-pool-table .transfer-pool-package {
+  max-width: 12rem;
+  word-break: break-all;
+}
+
 /* 加载 */
 .loading {
   opacity: 0.7;
