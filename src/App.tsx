@@ -63,7 +63,8 @@ interface RunOrderTaskParams {
   selectedMealTypes: (1 | 2 | 3)[]
   matchMode: 'keywords' | 'stock'
   keywords: string
-  stockThreshold: number
+	stockThresholdBreakfastDinner: number
+	stockThresholdLunch: number
   addressId: number
   addressDetail: string
 }
@@ -73,7 +74,18 @@ async function runOrderTask(
   params: RunOrderTaskParams,
   onProgress?: (results: RunDayResult[]) => void
 ): Promise<RunDayResult[]> {
-  const { openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThreshold, addressId, addressDetail } = params
+	const {
+		openid,
+		weekPick,
+		selectedWeekdays,
+		selectedMealTypes,
+		matchMode,
+		keywords,
+		stockThresholdBreakfastDinner,
+		stockThresholdLunch,
+		addressId,
+		addressDetail
+	} = params
   const weekDates = getWeekDates(weekPick)
   const kw = parseKeywords(keywords)
   const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
@@ -103,10 +115,12 @@ async function runOrderTask(
   const results: RunDayResult[] = []
   for (const item of menuResults) {
     const { dateStr, dateLabel, mealType, mealTypeLabel, list } = item
+		const threshold =
+			mealType === 2 ? stockThresholdLunch : stockThresholdBreakfastDinner
     const matched =
       matchMode === 'keywords'
         ? matchFirstMenuItem(list, kw)
-        : matchFirstByStockCount(list, stockThreshold)
+				: matchFirstByStockCount(list, threshold)
     if (matched) {
       try {
         const orderRes = await createOrder(
@@ -148,7 +162,7 @@ async function runOrderTask(
       const noMatchMsg =
         matchMode === 'keywords'
           ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-          : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${stockThreshold} 的套餐`)
+				: (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${threshold} 的套餐`)
       results.push({
         date: dateStr,
         dateLabel,
@@ -173,7 +187,8 @@ function App() {
   })
   const [matchMode, setMatchMode] = useState<'keywords' | 'stock'>('stock')
   const [keywords, setKeywords] = useState('金谷园')
-  const [stockThresholdInput, setStockThresholdInput] = useState('200')
+	const [stockThresholdBreakfastDinnerInput, setStockThresholdBreakfastDinnerInput] = useState('200')
+	const [stockThresholdLunchInput, setStockThresholdLunchInput] = useState('100')
   const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([1, 2, 3])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
@@ -233,7 +248,14 @@ function App() {
 
   const selectedAddress = addressList.find((a) => a.id === selectedAddressId)
   const getTaskParams = useCallback((): RunOrderTaskParams => {
-    const stockThreshold = matchMode === 'stock' ? (parseStockThreshold(stockThresholdInput) ?? 0) : 0
+		const stockThresholdBreakfastDinner =
+			matchMode === 'stock'
+				? (parseStockThreshold(stockThresholdBreakfastDinnerInput) ?? 0)
+				: 0
+		const stockThresholdLunch =
+			matchMode === 'stock'
+				? (parseStockThreshold(stockThresholdLunchInput) ?? 0)
+				: 0
     return {
       openid,
       weekPick,
@@ -241,11 +263,22 @@ function App() {
       selectedMealTypes,
       matchMode,
       keywords,
-      stockThreshold,
+			stockThresholdBreakfastDinner,
+			stockThresholdLunch,
       addressId: selectedAddress?.id ?? 118,
       addressDetail: selectedAddress?.detailAddress ?? '8层西侧吧台'
     }
-  }, [openid, weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdInput, selectedAddress])
+	}, [
+		openid,
+		weekPick,
+		selectedWeekdays,
+		selectedMealTypes,
+		matchMode,
+		keywords,
+		stockThresholdBreakfastDinnerInput,
+		stockThresholdLunchInput,
+		selectedAddress
+	])
 
   useEffect(() => {
     if (!openid.trim()) {
@@ -316,9 +349,10 @@ function App() {
       return
     }
     if (matchMode === 'stock') {
-      const parsed = parseStockThreshold(stockThresholdInput)
-      if (parsed === null) {
-        setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
+			const parsedBd = parseStockThreshold(stockThresholdBreakfastDinnerInput)
+			const parsedL = parseStockThreshold(stockThresholdLunchInput)
+			if (parsedBd === null || parsedL === null) {
+				setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
         return
       }
     }
@@ -336,7 +370,17 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [openid, matchMode, keywords, stockThresholdInput, weekPick, selectedWeekdays, selectedMealTypes, getTaskParams])
+	}, [
+		openid,
+		matchMode,
+		keywords,
+		stockThresholdBreakfastDinnerInput,
+		stockThresholdLunchInput,
+		weekPick,
+		selectedWeekdays,
+		selectedMealTypes,
+		getTaskParams
+	])
 
   const stopMonitor = useCallback(() => {
     if (monitorIntervalRef.current) {
@@ -360,7 +404,11 @@ function App() {
       setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
       return
     }
-    if (matchMode === 'stock' && parseStockThreshold(stockThresholdInput) === null) {
+		if (
+			matchMode === 'stock' &&
+			(parseStockThreshold(stockThresholdBreakfastDinnerInput) === null ||
+				parseStockThreshold(stockThresholdLunchInput) === null)
+		) {
       setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
       return
     }
@@ -415,7 +463,20 @@ function App() {
 
     doProbe()
     monitorIntervalRef.current = setInterval(doProbe, monitorIntervalMs)
-  }, [openid, matchMode, keywords, stockThresholdInput, monitorIntervalInput, weekPick, selectedWeekdays, selectedMealTypes, weekDates, stopMonitor, getTaskParams])
+	}, [
+		openid,
+		matchMode,
+		keywords,
+		stockThresholdBreakfastDinnerInput,
+		stockThresholdLunchInput,
+		monitorIntervalInput,
+		weekPick,
+		selectedWeekdays,
+		selectedMealTypes,
+		weekDates,
+		stopMonitor,
+		getTaskParams
+	])
 
   useEffect(() => {
     if (!isMonitoring) return
@@ -492,16 +553,31 @@ function App() {
         )}
         {matchMode === 'stock' && (
           <>
-            <label htmlFor="stockThreshold">总量 ≤ 此值则选中该套餐</label>
-            <input
-              id="stockThreshold"
-              type="text"
-              inputMode="numeric"
-              value={stockThresholdInput}
-              onChange={(e) => setStockThresholdInput(e.target.value)}
-              placeholder="如 200"
-            />
-            <p className="input-hint">选中总量 ≤ 该数值的第一个套餐；如 200 表示抢“总量在 200份 及以下”的饭</p>
+				<div className="row">
+					<div>
+						<label htmlFor="stockThresholdBd">早餐/晚餐 总量阈值</label>
+						<input
+							id="stockThresholdBd"
+							type="text"
+							inputMode="numeric"
+							value={stockThresholdBreakfastDinnerInput}
+							onChange={(e) => setStockThresholdBreakfastDinnerInput(e.target.value)}
+							placeholder="默认 200"
+						/>
+					</div>
+					<div>
+						<label htmlFor="stockThresholdLunch">午餐 总量阈值</label>
+						<input
+							id="stockThresholdLunch"
+							type="text"
+							inputMode="numeric"
+							value={stockThresholdLunchInput}
+							onChange={(e) => setStockThresholdLunchInput(e.target.value)}
+							placeholder="默认 100"
+						/>
+					</div>
+				</div>
+				<p className="input-hint">早餐/晚餐使用 200（默认），午餐使用 100（默认）；选中总量 ≤ 阈值的第一个套餐</p>
           </>
         )}
         <div style={{ marginTop: '1rem' }}>
