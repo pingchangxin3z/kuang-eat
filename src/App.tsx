@@ -2,9 +2,14 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { getMenu, createOrder, getAddressList, getTransferPoolList, obtainTransferOrder } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
+import { notifyOnGrabSuccess, notifyOnGrabFail } from '@/utils/notify'
 import type { AddressItem, TransferPoolItem } from '@/types/order'
 
 const OPENID_KEY = 'kuang-eat-openid'
+const NICKNAME_KEY = 'kuang-eat-nickname'
+
+/** 飞书群机器人 Webhook，由构建时环境变量 VITE_FEISHU_WEBHOOK 注入，所有人共用一个群 */
+const FEISHU_WEBHOOK = (import.meta.env.VITE_FEISHU_WEBHOOK ?? '').trim()
 
 /** 解析监控间隔（秒），仅接受 ≥1 的整数；无效返回 null */
 function parseMonitorIntervalSeconds(input: string): number | null {
@@ -213,11 +218,23 @@ function App() {
   const [transferPoolList, setTransferPoolList] = useState<TransferPoolItem[]>([])
   const [transferPoolLoading, setTransferPoolLoading] = useState(false)
   const [obtainingOrderId, setObtainingOrderId] = useState<number | null>(null)
+  const [nickname, setNickname] = useState(() =>
+    typeof localStorage !== 'undefined' ? localStorage.getItem(NICKNAME_KEY) ?? '' : ''
+  )
 
   const saveOpenid = useCallback((v: string) => {
     setOpenid(v)
     try {
       localStorage.setItem(OPENID_KEY, v)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const saveNickname = useCallback((v: string) => {
+    setNickname(v)
+    try {
+      localStorage.setItem(NICKNAME_KEY, v)
     } catch {
       // ignore
     }
@@ -364,14 +381,23 @@ function App() {
       const ordered = results.filter((r) => r.status === 'ordered').length
       const noMatch = results.filter((r) => r.status === 'no_match').length
       const err = results.filter((r) => r.status === 'error').length
-      if (ordered > 0) setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
-      else if (err > 0) setStatus({ type: 'error', msg: `无下单成功，${err} 单失败` })
-      else setStatus({ type: 'idle', msg: '全部未匹配' })
+      if (ordered > 0) {
+        setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
+        const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
+        const detail = results.filter((r) => r.status === 'ordered').map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`).join('\n')
+        notifyOnGrabSuccess(FEISHU_WEBHOOK, nickname, summary, detail || '无').catch(() => {})
+      } else {
+        const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
+        if (err > 0) setStatus({ type: 'error', msg: failSummary })
+        else setStatus({ type: 'idle', msg: failSummary })
+        notifyOnGrabFail(FEISHU_WEBHOOK, nickname, failSummary).catch(() => {})
+      }
     } finally {
       setLoading(false)
     }
 	}, [
 		openid,
+		nickname,
 		matchMode,
 		keywords,
 		stockThresholdBreakfastDinnerInput,
@@ -439,7 +465,7 @@ function App() {
         const res = await getMenu(probeMealType, ymd, params.openid)
         const list = res.data ?? []
         if (list.length > 0) {
-          stopMonitor()
+          // 不停止监控：只抢到部分餐（如周一早餐）时，其他餐（周一午/晚餐）后续上传菜单还会再探测到并继续抢
           setStatus({ type: 'idle', msg: '已检测到菜单，正在执行点餐…' })
           setLoading(true)
           try {
@@ -447,9 +473,20 @@ function App() {
             const ordered = results.filter((r) => r.status === 'ordered').length
             const noMatch = results.filter((r) => r.status === 'no_match').length
             const err = results.filter((r) => r.status === 'error').length
-            if (ordered > 0) setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
-            else if (err > 0) setStatus({ type: 'error', msg: `无下单成功，${err} 单失败` })
-            else setStatus({ type: 'idle', msg: '全部未匹配' })
+            if (ordered > 0) {
+              setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
+              const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
+              const detail = results.filter((r) => r.status === 'ordered').map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`).join('\n')
+              notifyOnGrabSuccess(FEISHU_WEBHOOK, nickname, summary, detail || '无').catch(() => {})
+            } else {
+              const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
+              if (err > 0) setStatus({ type: 'error', msg: failSummary })
+              else setStatus({ type: 'idle', msg: failSummary })
+              notifyOnGrabFail(FEISHU_WEBHOOK, nickname, failSummary).catch(() => {})
+            }
+            // 所有时段都已尝试（没有「暂无菜单」的 slot）则自动停止监控
+            const allSlotsTried = results.length > 0 && results.every((r) => r.message !== '暂无菜单')
+            if (allSlotsTried) stopMonitor()
           } finally {
             setLoading(false)
           }
@@ -465,6 +502,7 @@ function App() {
     monitorIntervalRef.current = setInterval(doProbe, monitorIntervalMs)
 	}, [
 		openid,
+		nickname,
 		matchMode,
 		keywords,
 		stockThresholdBreakfastDinnerInput,
@@ -504,6 +542,16 @@ function App() {
           onChange={(e) => saveOpenid(e.target.value)}
           placeholder="用于请求接口的 openid"
         />
+        <div style={{ marginTop: '1rem' }}>
+          <label htmlFor="nickname">昵称</label>
+          <input
+            id="nickname"
+            type="text"
+            value={nickname}
+            onChange={(e) => saveNickname(e.target.value)}
+            placeholder="如：zzz"
+          />
+        </div>
         <div style={{ marginTop: '1rem' }}>
           <label htmlFor="address">配送地址（下单时使用）</label>
           <select
