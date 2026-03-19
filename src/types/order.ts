@@ -74,3 +74,30 @@ export interface TransferPoolListResponse {
   msg: string
   data: TransferPoolItem[]
 }
+
+/** 按日期查询「已点的餐」接口：单条订单 */
+export interface OrderByDateItem {
+  orderTypeName: string
+  orderStatus: number
+  orderStatusName: string
+  orderId: number
+  packageName: string
+  url: string | null
+  timeRangeStr: string
+  orderFrom: number
+  assess_score: number
+  assess_content: string
+}
+
+/** 按日期查询「已点的餐」接口返回的 data */
+export interface OrderListByDateData {
+  breakfast: OrderByDateItem[]
+  lunch: OrderByDateItem[]
+  dinner: OrderByDateItem[]
+}
+
+export interface OrderListByDateResponse {
+  code: number
+  msg: string
+  data: OrderListByDateData
+}

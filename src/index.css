@@ -34,9 +34,32 @@ body {
 }
 
 #root {
-  max-width: 560px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 2rem 1.25rem;
+}
+
+/* 左右两栏：左侧主内容，右侧我的订餐 */
+.app-layout {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+}
+.app-main {
+  flex: 1;
+  min-width: 0;
+}
+.app-side {
+  width: 360px;
+  flex-shrink: 0;
+}
+@media (max-width: 900px) {
+  .app-layout {
+    flex-direction: column;
+  }
+  .app-side {
+    width: 100%;
+  }
 }
 
 /* 标题 */

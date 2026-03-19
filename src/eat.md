@@ -138,3 +138,74 @@ fetch("https://order.hersweetie.com/feishu-api/v2/transferpool/obtainOrder?order
   "mode": "cors",
   "credentials": "include"
 });
+
+
+## 获取已经点的餐
+fetch("https://order.hersweetie.com/feishu-api/v2/order/listByUidAndDate?orderDate=20260319", {
+  "headers": {
+    "accept": "application/json, text/plain, */*",
+    "accept-language": "zh-CN,zh;q=0.9",
+    "openid": "ou_66c42c8cf53b96ecd83555138ed5c1df",
+    "sec-ch-ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"macOS\"",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin"
+  },
+  "referrer": "https://order.hersweetie.com/feishu/home?lang=zh-CN&open_in_browser=true",
+  "body": null,
+  "method": "GET",
+  "mode": "cors",
+  "credentials": "include"
+});
+
+返回值示例：
+{
+    "code": 200,
+    "msg": "查询成功",
+    "data": {
+        "breakfast": [
+            {
+                "orderTypeName": "早餐",
+                "orderStatus": 2,
+                "orderStatusName": "已取餐",
+                "orderId": 1773386304557,
+                "packageName": "爸爸糖手工吐司，红豆吐司，认养一头牛纯牛奶",
+                "url": null,
+                "timeRangeStr": "前一天21:00截止预定\n美好的一天从早餐开始！",
+                "orderFrom": 0,
+                "assess_score": -1,
+                "assess_content": ""
+            }
+        ],
+        "lunch": [
+            {
+                "orderTypeName": "午餐",
+                "orderStatus": 2,
+                "orderStatusName": "已取餐",
+                "orderId": 1773386369526,
+                "packageName": "仔皇煲，腊味三绝（腊肠 腊肉 腊鸡腿）煲仔饭，（腊味肉质偏硬，肠胃弱慎点），水果",
+                "url": null,
+                "timeRangeStr": "前一天21:00截止预定\n再忙也要记得吃午饭哦~",
+                "orderFrom": 0,
+                "assess_score": -1,
+                "assess_content": ""
+            }
+        ],
+        "dinner": [
+            {
+                "orderTypeName": "晚餐",
+                "orderStatus": 1,
+                "orderStatusName": "已点餐",
+                "orderId": 1773387174813,
+                "packageName": "超模厨房，招牌香料烤鸡胸套餐 ，酸奶",
+                "url": "http://order.zphz.cn/orderid?=1773387174813",
+                "timeRangeStr": "当日17:00截止预定\r\n晚餐福利，仅为当日奋斗至20:30后的小伙伴开放预订",
+                "orderFrom": 0,
+                "assess_score": -1,
+                "assess_content": ""
+            }
+        ]
+    }
+}

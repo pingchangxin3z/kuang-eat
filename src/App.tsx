@@ -1,9 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { getMenu, createOrder, getAddressList, getTransferPoolList, obtainTransferOrder } from '@/api/order'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
+import { ConfigProvider, DatePicker, Card, Spin } from 'antd'
+import zhCN from 'antd/locale/zh_CN'
+
+dayjs.locale('zh-cn')
+import { getMenu, createOrder, getAddressList, getTransferPoolList, obtainTransferOrder, getOrderListByDate } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
 import { notifyOnGrabSuccess, notifyOnGrabFail } from '@/utils/notify'
-import type { AddressItem, TransferPoolItem } from '@/types/order'
+import type { AddressItem, TransferPoolItem, OrderByDateItem, MenuItem } from '@/types/order'
 
 const OPENID_KEY = 'kuang-eat-openid'
 const NICKNAME_KEY = 'kuang-eat-nickname'
@@ -221,6 +227,15 @@ function App() {
   const [nickname, setNickname] = useState(() =>
     typeof localStorage !== 'undefined' ? localStorage.getItem(NICKNAME_KEY) ?? '' : ''
   )
+  const [orderListDate, setOrderListDate] = useState(() => dayjs().format('YYYY-MM-DD'))
+  const [orderListData, setOrderListData] = useState<{
+    breakfast: OrderByDateItem[]
+    lunch: OrderByDateItem[]
+    dinner: OrderByDateItem[]
+  } | null>(null)
+  const [orderListLoading, setOrderListLoading] = useState(false)
+  const [menuData, setMenuData] = useState<{ breakfast: MenuItem[]; lunch: MenuItem[]; dinner: MenuItem[] } | null>(null)
+  const [menuLoading, setMenuLoading] = useState(false)
 
   const saveOpenid = useCallback((v: string) => {
     setOpenid(v)
@@ -527,8 +542,118 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!openid.trim()) {
+      setOrderListData(null)
+      setMenuData(null)
+      return
+    }
+    const orderDateYmd = orderListDate.replace(/-/g, '')
+    setOrderListLoading(true)
+    getOrderListByDate(openid, orderDateYmd)
+      .then((res) => {
+        const d = res.data
+        setOrderListData({
+          breakfast: Array.isArray(d?.breakfast) ? d.breakfast : [],
+          lunch: Array.isArray(d?.lunch) ? d.lunch : [],
+          dinner: Array.isArray(d?.dinner) ? d.dinner : []
+        })
+      })
+      .catch(() => setOrderListData(null))
+      .finally(() => setOrderListLoading(false))
+  }, [openid, orderListDate])
+
+  useEffect(() => {
+    if (!openid.trim()) {
+      setMenuData(null)
+      return
+    }
+    const ymd = orderListDate.replace(/-/g, '')
+    setMenuLoading(true)
+    Promise.all([
+      getMenu(1, ymd, openid).then((r) => r.data ?? []).catch(() => []),
+      getMenu(2, ymd, openid).then((r) => r.data ?? []).catch(() => []),
+      getMenu(3, ymd, openid).then((r) => r.data ?? []).catch(() => [])
+    ])
+      .then(([breakfast, lunch, dinner]) => setMenuData({ breakfast, lunch, dinner }))
+      .catch(() => setMenuData(null))
+      .finally(() => setMenuLoading(false))
+  }, [openid, orderListDate])
+
+  /**
+   * 归一化套餐名：菜单用 \n 分隔、已点的餐用 ，分隔，统一成同一格式再比较
+   * 例：菜单 "爸爸糖手工吐司\n红豆吐司\n认养一头牛" 与 已点 "爸爸糖手工吐司，红豆吐司，认养一头牛" 视为相同
+   */
+  const normalizeName = (s: string): string => {
+    const t = (s ?? '').toString()
+    return t
+      .replace(/[\s,，\n\r]+/g, ',')
+      .replace(/^,|,$/g, '')
+      .trim()
+  }
+
+  const isOrdered = (menuName: string, orderedNames: Set<string>): boolean => {
+    const n = normalizeName(menuName)
+    if (orderedNames.has(n)) return true
+    for (const o of orderedNames) {
+      if (o.length >= 3 && n.length >= 3 && (n.includes(o) || o.includes(n))) return true
+    }
+    return false
+  }
+
+  const renderMealCard = (
+    title: string,
+    orderedItems: OrderByDateItem[],
+    menuItems: MenuItem[]
+  ) => {
+    const orderedNames = new Set(
+      orderedItems.map((i) => normalizeName((i.packageName ?? '').toString()))
+    )
+
+    return (
+      <Card size="small" title={title} style={{ marginBottom: '0.75rem' }}>
+        {menuItems.length > 0 ? (
+          <ul style={{ margin: 0, paddingLeft: 0 }}>
+            {menuItems.map((m) => {
+              const name = normalizeName((m.packageName ?? '').toString())
+              const ordered = isOrdered((m.packageName ?? '').toString(), orderedNames)
+              return (
+                <li
+                  key={m.id}
+                  style={{
+                    listStyle: 'none',
+                    display: 'flex',
+                    gap: '0.5rem',
+                    alignItems: 'flex-start',
+                    padding: '0.375rem 0'
+                  }}
+                >
+                  {ordered ? (
+                    <span style={{ width: '1rem', color: 'var(--success)' }}>✓</span>
+                  ) : (
+                    <span style={{ width: '1rem' }} />
+                  )}
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ color: ordered ? 'var(--success)' : 'var(--text)' }}>{name}</div>
+                    <div className="input-hint" style={{ marginTop: '0.125rem' }}>
+                      剩余 {m.stockRemaining} / 总量 {m.stockCount}
+                    </div>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        ) : (
+          <span className="input-hint">暂无菜单</span>
+        )}
+      </Card>
+    )
+  }
+
   return (
-    <>
+    <ConfigProvider locale={zhCN}>
+    <div className="app-layout">
+      <div className="app-main">
       <h1 className="page-title">狂吃</h1>
       <p className="page-desc">选择工作日、餐次与关键词，一键自动获取菜单并匹配下单</p>
 
@@ -837,7 +962,35 @@ function App() {
       {status.msg && (
         <p className={`status ${status.type}`}>{status.msg}</p>
       )}
-    </>
+      </div>
+
+      <aside className="app-side section">
+        <h2 className="section-title">我的订餐</h2>
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.5rem' }}>日期</label>
+          <DatePicker
+            value={orderListDate ? dayjs(orderListDate) : null}
+            onChange={(_, dateStr) => setOrderListDate(dateStr || dayjs().format('YYYY-MM-DD'))}
+            allowClear={false}
+            style={{ width: '100%' }}
+          />
+        </div>
+        {!openid.trim() ? (
+          <p className="input-hint">请先填写 OpenID 后查看</p>
+        ) : orderListLoading || menuLoading ? (
+          <Spin tip="加载中…" />
+        ) : orderListData || menuData ? (
+          <>
+            {renderMealCard('早餐', orderListData?.breakfast ?? [], menuData?.breakfast ?? [])}
+            {renderMealCard('午餐', orderListData?.lunch ?? [], menuData?.lunch ?? [])}
+            {renderMealCard('晚餐', orderListData?.dinner ?? [], menuData?.dinner ?? [])}
+          </>
+        ) : (
+          <p className="input-hint">暂无数据</p>
+        )}
+      </aside>
+    </div>
+    </ConfigProvider>
   )
 }
 

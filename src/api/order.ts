@@ -3,7 +3,8 @@ import type {
   CreateOrderBody,
   AddressListResponse,
   TransferPoolListBody,
-  TransferPoolListResponse
+  TransferPoolListResponse,
+  OrderListByDateResponse
 } from '@/types/order'
 
 /** 开发时走 Vite 反向代理，避免 CORS；生产若部署同域可继续用相对路径 */
@@ -106,6 +107,30 @@ export async function obtainTransferOrder(
     credentials: 'include'
   })
   const data = (await res.json()) as { code: number; msg: string }
+  return data
+}
+
+const REFERRER_HOME = 'https://order.hersweetie.com/feishu/home?lang=zh-CN&open_in_browser=true'
+
+/**
+ * 按日期获取当前用户已点的餐（早/午/晚）
+ * @param openid 飞书 openid
+ * @param orderDate 日期 YYYYMMDD 如 20260319
+ */
+export async function getOrderListByDate(
+  openid: string,
+  orderDate: string
+): Promise<OrderListByDateResponse> {
+  const url = `${BASE}/feishu-api/v2/order/listByUidAndDate?orderDate=${orderDate}`
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: defaultHeaders(openid),
+    referrer: REFERRER_HOME,
+    mode: 'cors',
+    credentials: 'include'
+  })
+  const data = (await res.json()) as OrderListByDateResponse
+  if (data.code !== 200) throw new Error(data.msg || '获取订餐列表失败')
   return data
 }
 
