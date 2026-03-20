@@ -200,7 +200,7 @@ function App() {
   const [keywords, setKeywords] = useState('金谷园')
 	const [stockThresholdBreakfastDinnerInput, setStockThresholdBreakfastDinnerInput] = useState('200')
 	const [stockThresholdLunchInput, setStockThresholdLunchInput] = useState('100')
-  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([1, 2, 3])
+  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([1, 2])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
     const day = d.getDay()
@@ -216,6 +216,7 @@ function App() {
   const [monitorIntervalInput, setMonitorIntervalInput] = useState('3')
   const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
+  const monitorInFlightRef = useRef(false)
   const [addressList, setAddressList] = useState<AddressItem[]>([])
   const [selectedAddressId, setSelectedAddressId] = useState<number | null>(118)
   const [transferPoolDate, setTransferPoolDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -371,63 +372,12 @@ function App() {
     [openid]
   )
 
-  const startGrab = useCallback(async () => {
-    if (selectedWeekdays.length === 0) {
-      setStatus({ type: 'error', msg: '请至少选择一天（周一～周五）' })
-      return
-    }
-    if (selectedMealTypes.length === 0) {
-      setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
-      return
-    }
-    if (matchMode === 'stock') {
-			const parsedBd = parseStockThreshold(stockThresholdBreakfastDinnerInput)
-			const parsedL = parseStockThreshold(stockThresholdLunchInput)
-			if (parsedBd === null || parsedL === null) {
-				setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
-        return
-      }
-    }
-    setLoading(true)
-    setStatus({ type: 'idle', msg: '' })
-    setRunResults([])
-    try {
-      const results = await runOrderTask(getTaskParams(), setRunResults)
-      const ordered = results.filter((r) => r.status === 'ordered').length
-      const noMatch = results.filter((r) => r.status === 'no_match').length
-      const err = results.filter((r) => r.status === 'error').length
-      if (ordered > 0) {
-        setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
-        const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
-        const detail = results.filter((r) => r.status === 'ordered').map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`).join('\n')
-        notifyOnGrabSuccess(FEISHU_WEBHOOK, nickname, summary, detail || '无').catch(() => {})
-      } else {
-        const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
-        if (err > 0) setStatus({ type: 'error', msg: failSummary })
-        else setStatus({ type: 'idle', msg: failSummary })
-        notifyOnGrabFail(FEISHU_WEBHOOK, nickname, failSummary).catch(() => {})
-      }
-    } finally {
-      setLoading(false)
-    }
-	}, [
-		openid,
-		nickname,
-		matchMode,
-		keywords,
-		stockThresholdBreakfastDinnerInput,
-		stockThresholdLunchInput,
-		weekPick,
-		selectedWeekdays,
-		selectedMealTypes,
-		getTaskParams
-	])
-
   const stopMonitor = useCallback(() => {
     if (monitorIntervalRef.current) {
       clearInterval(monitorIntervalRef.current)
       monitorIntervalRef.current = null
     }
+    monitorInFlightRef.current = false
     setIsMonitoring(false)
     setStatus({ type: 'idle', msg: '' })
   }, [])
@@ -473,8 +423,13 @@ function App() {
     setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}…` })
 
     const doProbe = async () => {
+      if (monitorInFlightRef.current) return
+      monitorInFlightRef.current = true
       const params = monitorParamsRef.current
-      if (!params) return
+      if (!params) {
+        monitorInFlightRef.current = false
+        return
+      }
       try {
         const ymd = toMealDate(probeDateStr)
         const res = await getMenu(probeMealType, ymd, params.openid)
@@ -510,6 +465,8 @@ function App() {
         }
       } catch {
         setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}，请求失败` })
+      } finally {
+        monitorInFlightRef.current = false
       }
     }
 
@@ -821,20 +778,13 @@ function App() {
           </div>
         </div>
         <div className="action-row">
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={startGrab}
-            disabled={loading || isMonitoring}
-          >
-            {loading ? '抢饭中…' : '开始抢饭'}
-          </button>
           {!isMonitoring ? (
             <button
               type="button"
               className="btn btn-secondary"
               onClick={startMonitor}
               disabled={loading}
+              style={{ width: '100%', flex: '1 1 auto' }}
             >
               开始监控
             </button>
