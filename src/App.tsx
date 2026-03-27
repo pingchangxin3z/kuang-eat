@@ -1,29 +1,18 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
-import dayjs from 'dayjs'
-import 'dayjs/locale/zh-cn'
-import { ConfigProvider, DatePicker, Card, Spin } from 'antd'
+import { useState, useCallback, useEffect } from 'react'
+import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 
-dayjs.locale('zh-cn')
-import { getMenu, createOrder, getAddressList, getTransferPoolList, obtainTransferOrder, getOrderListByDate } from '@/api/order'
+import { getMenu, createOrder, getAddressList } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
 import { notifyOnGrabSuccess, notifyOnGrabFail } from '@/utils/notify'
-import type { AddressItem, TransferPoolItem, OrderByDateItem, MenuItem } from '@/types/order'
+import type { AddressItem } from '@/types/order'
 
 const OPENID_KEY = 'kuang-eat-openid'
 const NICKNAME_KEY = 'kuang-eat-nickname'
 
 /** 飞书群机器人 Webhook，由构建时环境变量 VITE_FEISHU_WEBHOOK 注入，所有人共用一个群 */
 const FEISHU_WEBHOOK = (import.meta.env.VITE_FEISHU_WEBHOOK ?? '').trim()
-
-/** 解析监控间隔（秒），仅接受 ≥1 的整数；无效返回 null */
-function parseMonitorIntervalSeconds(input: string): number | null {
-  const s = input.trim()
-  if (s === '') return null
-  const n = parseInt(s, 10)
-  return Number.isFinite(n) && n >= 1 ? n : null
-}
 
 function toMealDate(dateStr: string): string {
   return dateStr ? dateStr.replace(/-/g, '') : ''
@@ -210,33 +199,13 @@ function App() {
   })
   const [selectedWeekdays, setSelectedWeekdays] = useState<number[]>([0, 1, 2, 3, 4])
   const [loading, setLoading] = useState(false)
-  const [isMonitoring, setIsMonitoring] = useState(false)
   const [runResults, setRunResults] = useState<RunDayResult[]>([])
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
-  const [monitorIntervalInput, setMonitorIntervalInput] = useState('3')
-  const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const monitorParamsRef = useRef<RunOrderTaskParams | null>(null)
-  const monitorInFlightRef = useRef(false)
   const [addressList, setAddressList] = useState<AddressItem[]>([])
   const [selectedAddressId, setSelectedAddressId] = useState<number | null>(118)
-  const [transferPoolDate, setTransferPoolDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [transferPoolMealType, setTransferPoolMealType] = useState<string>('')
-  const [transferPoolAddressId, setTransferPoolAddressId] = useState<string>('')
-  const [transferPoolList, setTransferPoolList] = useState<TransferPoolItem[]>([])
-  const [transferPoolLoading, setTransferPoolLoading] = useState(false)
-  const [obtainingOrderId, setObtainingOrderId] = useState<number | null>(null)
   const [nickname, setNickname] = useState(() =>
     typeof localStorage !== 'undefined' ? localStorage.getItem(NICKNAME_KEY) ?? '' : ''
   )
-  const [orderListDate, setOrderListDate] = useState(() => dayjs().format('YYYY-MM-DD'))
-  const [orderListData, setOrderListData] = useState<{
-    breakfast: OrderByDateItem[]
-    lunch: OrderByDateItem[]
-    dinner: OrderByDateItem[]
-  } | null>(null)
-  const [orderListLoading, setOrderListLoading] = useState(false)
-  const [menuData, setMenuData] = useState<{ breakfast: MenuItem[]; lunch: MenuItem[]; dinner: MenuItem[] } | null>(null)
-  const [menuLoading, setMenuLoading] = useState(false)
 
   const saveOpenid = useCallback((v: string) => {
     setOpenid(v)
@@ -323,66 +292,7 @@ function App() {
       .catch(() => setAddressList([]))
   }, [openid])
 
-  const fetchTransferPool = useCallback(async () => {
-    if (!openid.trim()) {
-      setStatus({ type: 'error', msg: '请先填写 OpenID' })
-      return
-    }
-    setTransferPoolLoading(true)
-    setTransferPoolList([])
-    try {
-      const orderDate = transferPoolDate.replace(/-/g, '')
-      const res = await getTransferPoolList(openid, {
-        orderDate,
-        mealType: transferPoolMealType || undefined,
-        addressId: transferPoolAddressId || undefined
-      })
-      setTransferPoolList(res.data ?? [])
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : '获取转让池失败'
-      setStatus({ type: 'error', msg })
-    } finally {
-      setTransferPoolLoading(false)
-    }
-  }, [openid, transferPoolDate, transferPoolMealType, transferPoolAddressId])
-
-  const handleObtainTransfer = useCallback(
-    async (orderId: number) => {
-      if (!openid.trim()) {
-        setStatus({ type: 'error', msg: '请先填写 OpenID' })
-        return
-      }
-      setObtainingOrderId(orderId)
-      setStatus({ type: 'idle', msg: '' })
-      try {
-        const res = await obtainTransferOrder(openid, orderId)
-        if (res.code === 200) {
-          setStatus({ type: 'success', msg: res.msg ?? '领取成功' })
-          setTransferPoolList((prev) => prev.filter((item) => item.orderId !== orderId))
-        } else {
-          setStatus({ type: 'error', msg: res.msg ?? '领取失败' })
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : '领取请求失败'
-        setStatus({ type: 'error', msg })
-      } finally {
-        setObtainingOrderId(null)
-      }
-    },
-    [openid]
-  )
-
-  const stopMonitor = useCallback(() => {
-    if (monitorIntervalRef.current) {
-      clearInterval(monitorIntervalRef.current)
-      monitorIntervalRef.current = null
-    }
-    monitorInFlightRef.current = false
-    setIsMonitoring(false)
-    setStatus({ type: 'idle', msg: '' })
-  }, [])
-
-  const startMonitor = useCallback(() => {
+  const handleStartOrder = useCallback(async () => {
     if (!openid.trim()) {
       setStatus({ type: 'error', msg: '请先填写 OpenID' })
       return
@@ -395,224 +305,63 @@ function App() {
       setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
       return
     }
-		if (
-			matchMode === 'stock' &&
-			(parseStockThreshold(stockThresholdBreakfastDinnerInput) === null ||
-				parseStockThreshold(stockThresholdLunchInput) === null)
-		) {
+    if (
+      matchMode === 'stock' &&
+      (parseStockThreshold(stockThresholdBreakfastDinnerInput) === null ||
+        parseStockThreshold(stockThresholdLunchInput) === null)
+    ) {
       setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
       return
     }
-    const intervalSeconds = parseMonitorIntervalSeconds(monitorIntervalInput)
-    if (intervalSeconds === null) {
-      setStatus({ type: 'error', msg: '请输入有效的监控间隔（≥1 的整数，单位秒）' })
-      return
-    }
-    const monitorIntervalMs = intervalSeconds * 1000
-    const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
-    const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
-    const probeDayIndex = sortedDays[0]
-    const probeMealType = sortedMealTypes[0]
-    const probeDateStr = weekDates[probeDayIndex]
-    const probeDateLabel = getWeekdayLabel(probeDayIndex)
-    const probeMealLabel = MEAL_OPTIONS.find((o) => o.value === probeMealType)?.label ?? ''
-
-    monitorParamsRef.current = getTaskParams()
-    setIsMonitoring(true)
+    setLoading(true)
     setRunResults([])
-    setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}…` })
-
-    const doProbe = async () => {
-      if (monitorInFlightRef.current) return
-      monitorInFlightRef.current = true
-      const params = monitorParamsRef.current
-      if (!params) {
-        monitorInFlightRef.current = false
-        return
-      }
-      try {
-        const ymd = toMealDate(probeDateStr)
-        const res = await getMenu(probeMealType, ymd, params.openid)
-        const list = res.data ?? []
-        if (list.length > 0) {
-          // 不停止监控：只抢到部分餐（如周一早餐）时，其他餐（周一午/晚餐）后续上传菜单还会再探测到并继续抢
-          setStatus({ type: 'idle', msg: '已检测到菜单，正在执行点餐…' })
-          setLoading(true)
-          try {
-            const results = await runOrderTask(params, setRunResults)
-            const ordered = results.filter((r) => r.status === 'ordered').length
-            const noMatch = results.filter((r) => r.status === 'no_match').length
-            const err = results.filter((r) => r.status === 'error').length
-            if (ordered > 0) {
-              setStatus({ type: 'success', msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}` })
-              const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
-              const detail = results.filter((r) => r.status === 'ordered').map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`).join('\n')
-              notifyOnGrabSuccess(FEISHU_WEBHOOK, nickname, summary, detail || '无').catch(() => {})
-            } else {
-              const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
-              if (err > 0) setStatus({ type: 'error', msg: failSummary })
-              else setStatus({ type: 'idle', msg: failSummary })
-              notifyOnGrabFail(FEISHU_WEBHOOK, nickname, failSummary).catch(() => {})
-            }
-            // 所有时段都已尝试（没有「暂无菜单」的 slot）则自动停止监控
-            const allSlotsTried = results.length > 0 && results.every((r) => r.message !== '暂无菜单')
-            if (allSlotsTried) stopMonitor()
-          } finally {
-            setLoading(false)
-          }
-        } else {
-          setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}，暂无菜单` })
-        }
-      } catch {
-        setStatus({ type: 'idle', msg: `监控中，每 ${intervalSeconds}s 探测 ${probeDateLabel} ${probeMealLabel}，请求失败` })
-      } finally {
-        monitorInFlightRef.current = false
-      }
-    }
-
-    doProbe()
-    monitorIntervalRef.current = setInterval(doProbe, monitorIntervalMs)
-	}, [
-		openid,
-		nickname,
-		matchMode,
-		keywords,
-		stockThresholdBreakfastDinnerInput,
-		stockThresholdLunchInput,
-		monitorIntervalInput,
-		weekPick,
-		selectedWeekdays,
-		selectedMealTypes,
-		weekDates,
-		stopMonitor,
-		getTaskParams
-	])
-
-  useEffect(() => {
-    if (!isMonitoring) return
-    monitorParamsRef.current = getTaskParams()
-  }, [isMonitoring, getTaskParams])
-
-  useEffect(() => {
-    return () => {
-      if (monitorIntervalRef.current) clearInterval(monitorIntervalRef.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!openid.trim()) {
-      setOrderListData(null)
-      setMenuData(null)
-      return
-    }
-    const orderDateYmd = orderListDate.replace(/-/g, '')
-    setOrderListLoading(true)
-    getOrderListByDate(openid, orderDateYmd)
-      .then((res) => {
-        const d = res.data
-        setOrderListData({
-          breakfast: Array.isArray(d?.breakfast) ? d.breakfast : [],
-          lunch: Array.isArray(d?.lunch) ? d.lunch : [],
-          dinner: Array.isArray(d?.dinner) ? d.dinner : []
+    setStatus({ type: 'idle', msg: '正在点餐…' })
+    try {
+      const params = getTaskParams()
+      const results = await runOrderTask(params, setRunResults)
+      const ordered = results.filter((r) => r.status === 'ordered').length
+      const noMatch = results.filter((r) => r.status === 'no_match').length
+      const err = results.filter((r) => r.status === 'error').length
+      if (ordered > 0) {
+        setStatus({
+          type: 'success',
+          msg: `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
         })
-      })
-      .catch(() => setOrderListData(null))
-      .finally(() => setOrderListLoading(false))
-  }, [openid, orderListDate])
-
-  useEffect(() => {
-    if (!openid.trim()) {
-      setMenuData(null)
-      return
+        const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
+        const detail = results
+          .filter((r) => r.status === 'ordered')
+          .map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`)
+          .join('\n')
+        notifyOnGrabSuccess(FEISHU_WEBHOOK, nickname, summary, detail || '无').catch(() => {})
+      } else {
+        const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
+        if (err > 0) setStatus({ type: 'error', msg: failSummary })
+        else setStatus({ type: 'idle', msg: failSummary })
+        notifyOnGrabFail(FEISHU_WEBHOOK, nickname, failSummary).catch(() => {})
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '点餐失败'
+      setStatus({ type: 'error', msg })
+    } finally {
+      setLoading(false)
     }
-    const ymd = orderListDate.replace(/-/g, '')
-    setMenuLoading(true)
-    Promise.all([
-      getMenu(1, ymd, openid).then((r) => r.data ?? []).catch(() => []),
-      getMenu(2, ymd, openid).then((r) => r.data ?? []).catch(() => []),
-      getMenu(3, ymd, openid).then((r) => r.data ?? []).catch(() => [])
-    ])
-      .then(([breakfast, lunch, dinner]) => setMenuData({ breakfast, lunch, dinner }))
-      .catch(() => setMenuData(null))
-      .finally(() => setMenuLoading(false))
-  }, [openid, orderListDate])
-
-  /**
-   * 归一化套餐名：菜单用 \n 分隔、已点的餐用 ，分隔，统一成同一格式再比较
-   * 例：菜单 "爸爸糖手工吐司\n红豆吐司\n认养一头牛" 与 已点 "爸爸糖手工吐司，红豆吐司，认养一头牛" 视为相同
-   */
-  const normalizeName = (s: string): string => {
-    const t = (s ?? '').toString()
-    return t
-      .replace(/[\s,，\n\r]+/g, ',')
-      .replace(/^,|,$/g, '')
-      .trim()
-  }
-
-  const isOrdered = (menuName: string, orderedNames: Set<string>): boolean => {
-    const n = normalizeName(menuName)
-    if (orderedNames.has(n)) return true
-    for (const o of orderedNames) {
-      if (o.length >= 3 && n.length >= 3 && (n.includes(o) || o.includes(n))) return true
-    }
-    return false
-  }
-
-  const renderMealCard = (
-    title: string,
-    orderedItems: OrderByDateItem[],
-    menuItems: MenuItem[]
-  ) => {
-    const orderedNames = new Set(
-      orderedItems.map((i) => normalizeName((i.packageName ?? '').toString()))
-    )
-
-    return (
-      <Card size="small" title={title} style={{ marginBottom: '0.75rem' }}>
-        {menuItems.length > 0 ? (
-          <ul style={{ margin: 0, paddingLeft: 0 }}>
-            {menuItems.map((m) => {
-              const name = normalizeName((m.packageName ?? '').toString())
-              const ordered = isOrdered((m.packageName ?? '').toString(), orderedNames)
-              return (
-                <li
-                  key={m.id}
-                  style={{
-                    listStyle: 'none',
-                    display: 'flex',
-                    gap: '0.5rem',
-                    alignItems: 'flex-start',
-                    padding: '0.375rem 0'
-                  }}
-                >
-                  {ordered ? (
-                    <span style={{ width: '1rem', color: 'var(--success)' }}>✓</span>
-                  ) : (
-                    <span style={{ width: '1rem' }} />
-                  )}
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ color: ordered ? 'var(--success)' : 'var(--text)' }}>{name}</div>
-                    <div className="input-hint" style={{ marginTop: '0.125rem' }}>
-                      剩余 {m.stockRemaining} / 总量 {m.stockCount}
-                    </div>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-        ) : (
-          <span className="input-hint">暂无菜单</span>
-        )}
-      </Card>
-    )
-  }
+  }, [
+    openid,
+    nickname,
+    matchMode,
+    stockThresholdBreakfastDinnerInput,
+    stockThresholdLunchInput,
+    selectedWeekdays,
+    selectedMealTypes,
+    getTaskParams
+  ])
 
   return (
     <ConfigProvider locale={zhCN}>
     <div className="app-layout">
       <div className="app-main">
       <h1 className="page-title">狂吃</h1>
-      <p className="page-desc">选择工作日、餐次与关键词，一键自动获取菜单并匹配下单</p>
+      <p className="page-desc">选择工作日、餐次与匹配规则，点击「开始点餐」立即拉取菜单并下单</p>
 
       <section className="section">
         <h2 className="section-title">鉴权</h2>
@@ -764,131 +513,20 @@ function App() {
             订餐周：{weekDates[0]} ～ {weekDates[6]}（周一～周日）
           </p>
         </div>
-        <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'flex-end', gap: '0.75rem' }}>
-          <div style={{ flex: '0 0 8rem' }}>
-            <label htmlFor="monitorInterval">监控间隔（秒）</label>
-            <input
-              id="monitorInterval"
-              type="text"
-              inputMode="numeric"
-              value={monitorIntervalInput}
-              onChange={(e) => setMonitorIntervalInput(e.target.value)}
-              placeholder="如 10"
-            />
-          </div>
-        </div>
         <div className="action-row">
-          {!isMonitoring ? (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={startMonitor}
-              disabled={loading}
-              style={{ width: '100%', flex: '1 1 auto' }}
-            >
-              开始监控
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={stopMonitor}
-            >
-              停止监控
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void handleStartOrder()}
+            disabled={loading}
+            style={{ width: '100%', flex: '1 1 auto' }}
+          >
+            {loading ? '点餐中…' : '开始点餐'}
+          </button>
         </div>
         <p className="input-hint" style={{ marginTop: '0.5rem' }}>
-          监控模式：按上面设置的间隔（秒）探测菜单（仅探测所选的第一天第一餐，一周菜单同时更新）；有数据后自动执行点餐并展示结果。某餐仍为空时该餐记「暂无菜单」并继续其余任务。
+          按当前偏好立即拉取各天各餐菜单并尝试下单；某餐无菜单或无法匹配时会在结果中显示。
         </p>
-      </section>
-
-      <section className="section">
-        <h2 className="section-title">转让池</h2>
-        <p className="input-hint" style={{ marginTop: 0, marginBottom: '0.75rem' }}>
-          按日期、餐次、地址筛选转让池列表；点击「领取」可获取该转让餐。
-        </p>
-        <div className="row" style={{ marginBottom: '0.75rem' }}>
-          <div>
-            <label>日期</label>
-            <input
-              type="date"
-              value={transferPoolDate}
-              onChange={(e) => setTransferPoolDate(e.target.value)}
-            />
-          </div>
-          <div>
-            <label>餐次</label>
-            <select
-              value={transferPoolMealType}
-              onChange={(e) => setTransferPoolMealType(e.target.value)}
-            >
-              <option value="">全部</option>
-              {MEAL_OPTIONS.map((o) => (
-                <option key={o.value} value={String(o.value)}>{o.label}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div style={{ marginBottom: '0.75rem' }}>
-          <label>地址</label>
-          <select
-            value={transferPoolAddressId}
-            onChange={(e) => setTransferPoolAddressId(e.target.value)}
-          >
-            <option value="">全部</option>
-            {addressList.map((a) => (
-              <option key={a.id} value={String(a.id)}>{a.detailAddress}</option>
-            ))}
-          </select>
-        </div>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={fetchTransferPool}
-          disabled={transferPoolLoading}
-        >
-          {transferPoolLoading ? '查询中…' : '查询转让池'}
-        </button>
-        {transferPoolList.length > 0 && (
-          <div className="transfer-pool-table-wrap">
-            <table className="transfer-pool-table">
-              <thead>
-                <tr>
-                  <th>日期</th>
-                  <th>餐次</th>
-                  <th>套餐</th>
-                  <th>转让人</th>
-                  <th>部门</th>
-                  <th>地址</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transferPoolList.map((item) => (
-                  <tr key={item.id}>
-                    <td>{String(item.orderDate)}</td>
-                    <td>{MEAL_OPTIONS.find((o) => o.value === item.mealType)?.label ?? item.mealType}</td>
-                    <td className="transfer-pool-package">{item.packageName.replace(/\n/g, ' ')}</td>
-                    <td>{item.userName}</td>
-                    <td>{item.department}</td>
-                    <td>{item.addressDetail}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-chip"
-                        onClick={() => handleObtainTransfer(item.orderId)}
-                        disabled={obtainingOrderId !== null}
-                      >
-                        {obtainingOrderId === item.orderId ? '领取中…' : '领取'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </section>
 
       {runResults.length > 0 && (
@@ -913,32 +551,6 @@ function App() {
         <p className={`status ${status.type}`}>{status.msg}</p>
       )}
       </div>
-
-      <aside className="app-side section">
-        <h2 className="section-title">我的订餐</h2>
-        <div style={{ marginBottom: '1rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem' }}>日期</label>
-          <DatePicker
-            value={orderListDate ? dayjs(orderListDate) : null}
-            onChange={(_, dateStr) => setOrderListDate(dateStr || dayjs().format('YYYY-MM-DD'))}
-            allowClear={false}
-            style={{ width: '100%' }}
-          />
-        </div>
-        {!openid.trim() ? (
-          <p className="input-hint">请先填写 OpenID 后查看</p>
-        ) : orderListLoading || menuLoading ? (
-          <Spin tip="加载中…" />
-        ) : orderListData || menuData ? (
-          <>
-            {renderMealCard('早餐', orderListData?.breakfast ?? [], menuData?.breakfast ?? [])}
-            {renderMealCard('午餐', orderListData?.lunch ?? [], menuData?.lunch ?? [])}
-            {renderMealCard('晚餐', orderListData?.dinner ?? [], menuData?.dinner ?? [])}
-          </>
-        ) : (
-          <p className="input-hint">暂无数据</p>
-        )}
-      </aside>
     </div>
     </ConfigProvider>
   )

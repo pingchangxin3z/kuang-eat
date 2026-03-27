@@ -1,16 +1,13 @@
 import type {
   MenuListResponse,
   CreateOrderBody,
-  AddressListResponse,
-  TransferPoolListBody,
-  TransferPoolListResponse,
-  OrderListByDateResponse
+  AddressListResponse
 } from '@/types/order'
+import { getFeishuAntiForgeryHeaders } from '@/utils/feishuWasmSign'
 
 /** 开发时走 Vite 反向代理，避免 CORS；生产若部署同域可继续用相对路径 */
 const BASE = ''
 const REFERRER = 'https://order.hersweetie.com/feishu/order/work'
-const REFERRER_TRANSFER = 'https://order.hersweetie.com/feishu/transferPool'
 
 function defaultHeaders(openid: string, contentType?: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -28,6 +25,12 @@ function defaultHeaders(openid: string, contentType?: string): Record<string, st
   return headers
 }
 
+/** 官方前端 axios 拦截器中的 x-sign / x-time（wasm get_sign） */
+async function feishuSignedHeaders(openid: string, contentType?: string): Promise<Record<string, string>> {
+  const anti = await getFeishuAntiForgeryHeaders(openid)
+  return { ...defaultHeaders(openid, contentType), ...anti }
+}
+
 /**
  * 获取某天某顿餐的菜单
  * @param mealType 1 早餐 2 午餐 3 晚餐
@@ -41,7 +44,7 @@ export async function getMenu(
   const url = `${BASE}/feishu-api/v2/dailymeals/list?mealType=${mealType}&mealDate=${mealDate}`
   const res = await fetch(url, {
     method: 'GET',
-    headers: defaultHeaders(openid),
+    headers: await feishuSignedHeaders(openid),
     referrer: `${REFERRER}?mealType=${mealType}&mealDate=${mealDate}`,
     mode: 'cors',
     credentials: 'include'
@@ -61,76 +64,13 @@ const DEFAULT_ADDRESS_DETAIL = '8层西侧吧台'
 export async function getAddressList(openid: string): Promise<AddressListResponse> {
   const res = await fetch(`${BASE}/feishu-api/address/list`, {
     method: 'GET',
-    headers: defaultHeaders(openid),
-    referrer: REFERRER_TRANSFER,
+    headers: await feishuSignedHeaders(openid),
+    referrer: REFERRER,
     mode: 'cors',
     credentials: 'include'
   })
   const data = (await res.json()) as AddressListResponse
   if (data.code !== 200) throw new Error(data.msg || '获取地址列表失败')
-  return data
-}
-
-/**
- * 获取转让池列表
- */
-export async function getTransferPoolList(
-  openid: string,
-  body: TransferPoolListBody
-): Promise<TransferPoolListResponse> {
-  const res = await fetch(`${BASE}/feishu-api/v2/transferpool/list`, {
-    method: 'POST',
-    headers: defaultHeaders(openid, 'application/json;charset=UTF-8'),
-    referrer: REFERRER_TRANSFER,
-    mode: 'cors',
-    credentials: 'include',
-    body: JSON.stringify(body)
-  })
-  const data = (await res.json()) as TransferPoolListResponse
-  if (data.code !== 200) throw new Error(data.msg || '获取转让池列表失败')
-  return data
-}
-
-/**
- * 领取转让池的餐（根据 orderId）
- */
-export async function obtainTransferOrder(
-  openid: string,
-  orderId: number
-): Promise<{ code: number; msg: string }> {
-  const url = `${BASE}/feishu-api/v2/transferpool/obtainOrder?orderId=${orderId}`
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: defaultHeaders(openid),
-    referrer: REFERRER_TRANSFER,
-    mode: 'cors',
-    credentials: 'include'
-  })
-  const data = (await res.json()) as { code: number; msg: string }
-  return data
-}
-
-const REFERRER_HOME = 'https://order.hersweetie.com/feishu/home?lang=zh-CN&open_in_browser=true'
-
-/**
- * 按日期获取当前用户已点的餐（早/午/晚）
- * @param openid 飞书 openid
- * @param orderDate 日期 YYYYMMDD 如 20260319
- */
-export async function getOrderListByDate(
-  openid: string,
-  orderDate: string
-): Promise<OrderListByDateResponse> {
-  const url = `${BASE}/feishu-api/v2/order/listByUidAndDate?orderDate=${orderDate}`
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: defaultHeaders(openid),
-    referrer: REFERRER_HOME,
-    mode: 'cors',
-    credentials: 'include'
-  })
-  const data = (await res.json()) as OrderListByDateResponse
-  if (data.code !== 200) throw new Error(data.msg || '获取订餐列表失败')
   return data
 }
 
@@ -150,7 +90,7 @@ export async function createOrder(
   }
   const res = await fetch(`${BASE}/feishu-api/order/create`, {
     method: 'POST',
-    headers: defaultHeaders(openid, 'application/json;charset=UTF-8'),
+    headers: await feishuSignedHeaders(openid, 'application/json;charset=UTF-8'),
     referrer: `${REFERRER}?mealType=${body.mealType}&mealDate=${body.orderDate}`,
     mode: 'cors',
     credentials: 'include',
