@@ -6,7 +6,7 @@ import { getMenu, createOrder, getAddressList } from '@/api/order'
 import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
 import { notifyOnGrabSuccess, notifyOnGrabFail } from '@/utils/notify'
-import type { AddressItem } from '@/types/order'
+import type { AddressItem, MenuItem } from '@/types/order'
 
 const OPENID_KEY = 'kuang-eat-openid'
 const NICKNAME_KEY = 'kuang-eat-nickname'
@@ -69,7 +69,7 @@ interface RunOrderTaskParams {
   addressDetail: string
 }
 
-/** 执行完整点餐任务，返回每条结果；先并行拉取所有菜单，再按顺序匹配与下单以缩短总耗时 */
+/** 按「工作日×餐次」顺序串行：拉该餐菜单 → 匹配 → 下单；避免并发洪峰，某一餐失败不影响后续餐 */
 async function runOrderTask(
   params: RunOrderTaskParams,
   onProgress?: (results: RunDayResult[]) => void
@@ -101,26 +101,36 @@ async function runOrderTask(
     }
   }
 
-  const menuResults = await Promise.all(
-    tasks.map(async (t) => {
-      try {
-        const res = await getMenu(t.mealType, toMealDate(t.dateStr), openid)
-        return { ...t, list: res.data ?? [] }
-      } catch {
-        return { ...t, list: [] }
-      }
-    })
-  )
-
   const results: RunDayResult[] = []
-  for (const item of menuResults) {
-    const { dateStr, dateLabel, mealType, mealTypeLabel, list } = item
-		const threshold =
-			mealType === 2 ? stockThresholdLunch : stockThresholdBreakfastDinner
+
+  for (const t of tasks) {
+    const { dateStr, dateLabel, mealType, mealTypeLabel } = t
+    const threshold =
+      mealType === 2 ? stockThresholdLunch : stockThresholdBreakfastDinner
+
+    let list: MenuItem[] = []
+    try {
+      const res = await getMenu(mealType, toMealDate(dateStr), openid)
+      list = res.data ?? []
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '获取菜单失败'
+      results.push({
+        date: dateStr,
+        dateLabel,
+        mealType,
+        mealTypeLabel,
+        status: 'error',
+        message: msg
+      })
+      onProgress?.([...results])
+      continue
+    }
+
     const matched =
       matchMode === 'keywords'
         ? matchFirstMenuItem(list, kw)
-				: matchFirstByStockCount(list, threshold)
+        : matchFirstByStockCount(list, threshold)
+
     if (matched) {
       try {
         const orderRes = await createOrder(
@@ -155,14 +165,14 @@ async function runOrderTask(
           })
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : '请求失败'
+        const msg = e instanceof Error ? e.message : '下单请求失败'
         results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'error', message: msg })
       }
     } else {
       const noMatchMsg =
         matchMode === 'keywords'
           ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-				: (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${threshold} 的套餐`)
+          : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${threshold} 的套餐`)
       results.push({
         date: dateStr,
         dateLabel,
@@ -174,6 +184,7 @@ async function runOrderTask(
     }
     onProgress?.([...results])
   }
+
   return results
 }
 
