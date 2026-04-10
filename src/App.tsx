@@ -189,7 +189,7 @@ function App() {
   const [keywords, setKeywords] = useState('金谷园')
 	const [stockThresholdBreakfastDinnerInput, setStockThresholdBreakfastDinnerInput] = useState('200')
 	const [stockThresholdLunchInput, setStockThresholdLunchInput] = useState('100')
-  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([1, 2])
+  const [selectedMealTypes, setSelectedMealTypes] = useState<(1 | 2 | 3)[]>([2])
   const [weekPick, setWeekPick] = useState(() => {
     const d = new Date()
     const day = d.getDay()
