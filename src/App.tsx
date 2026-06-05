@@ -164,6 +164,7 @@ interface UserConfig {
   id: string
   openid: string
   nickname: string
+  enabled: boolean
 }
 
 interface UserRunResult {
@@ -172,8 +173,50 @@ interface UserRunResult {
   results: RunDayResult[]
 }
 
+function getUserResultName(user: UserConfig): string {
+  return user.nickname.trim() || user.openid.trim()
+}
+
+function getResultCounts(results: RunDayResult[]): { ordered: number; noMatch: number; err: number } {
+  return {
+    ordered: results.filter((r) => r.status === 'ordered').length,
+    noMatch: results.filter((r) => r.status === 'no_match').length,
+    err: results.filter((r) => r.status === 'error').length
+  }
+}
+
+function notifyUserResult(user: UserConfig, results: RunDayResult[]): void {
+  const displayName = user.nickname.trim()
+  const { ordered, noMatch, err } = getResultCounts(results)
+
+  if (ordered > 0) {
+    const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
+    const detail = results
+      .filter((r) => r.status === 'ordered')
+      .map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`)
+      .join('\n')
+    notifyOnGrabSuccess(FEISHU_WEBHOOK, displayName, summary, detail || '无').catch(() => {})
+  } else {
+    const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
+    notifyOnGrabFail(FEISHU_WEBHOOK, displayName, failSummary).catch(() => {})
+  }
+}
+
 function generateId(): string {
   return Math.random().toString(36).slice(2, 10)
+}
+
+function normalizeUserConfig(user: Partial<UserConfig>): UserConfig {
+  return {
+    id: user.id || generateId(),
+    openid: user.openid ?? '',
+    nickname: user.nickname ?? '',
+    enabled: user.enabled ?? true
+  }
+}
+
+function createEmptyUser(): UserConfig {
+  return { id: generateId(), openid: '', nickname: '', enabled: true }
 }
 
 function loadUsers(): UserConfig[] {
@@ -181,15 +224,15 @@ function loadUsers(): UserConfig[] {
     const saved = localStorage.getItem(USERS_KEY)
     if (saved) {
       const parsed = JSON.parse(saved)
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed.map(normalizeUserConfig)
     }
     const oldOpenid = localStorage.getItem(OPENID_KEY) ?? ''
     const oldNickname = localStorage.getItem(NICKNAME_KEY) ?? ''
     if (oldOpenid) {
-      return [{ id: generateId(), openid: oldOpenid, nickname: oldNickname }]
+      return [{ id: generateId(), openid: oldOpenid, nickname: oldNickname, enabled: true }]
     }
   } catch { /* ignore */ }
-  return [{ id: generateId(), openid: '', nickname: '' }]
+  return [createEmptyUser()]
 }
 
 function persistUsers(users: UserConfig[]): void {
@@ -214,6 +257,7 @@ function App() {
   })
   const [selectedWeekdays, setSelectedWeekdays] = useState<number[]>([0, 1, 2, 3, 4])
   const [loading, setLoading] = useState(false)
+  const [retryingUserIds, setRetryingUserIds] = useState<string[]>([])
   const [userResults, setUserResults] = useState<UserRunResult[]>([])
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
   const [addressList, setAddressList] = useState<AddressItem[]>([])
@@ -225,12 +269,12 @@ function App() {
   }, [])
 
   const addUser = useCallback(() => {
-    updateUsers([...users, { id: generateId(), openid: '', nickname: '' }])
+    updateUsers([...users, createEmptyUser()])
   }, [users, updateUsers])
 
   const removeUser = useCallback((id: string) => {
     const next = users.filter((u) => u.id !== id)
-    updateUsers(next.length > 0 ? next : [{ id: generateId(), openid: '', nickname: '' }])
+    updateUsers(next.length > 0 ? next : [createEmptyUser()])
   }, [users, updateUsers])
 
   const updateUser = useCallback(
@@ -239,6 +283,10 @@ function App() {
     },
     [users, updateUsers]
   )
+
+  const toggleUserEnabled = useCallback((id: string) => {
+    updateUsers(users.map((u) => (u.id === id ? { ...u, enabled: !u.enabled } : u)))
+  }, [users, updateUsers])
 
   const toggleWeekday = useCallback((index: number) => {
     setSelectedWeekdays((prev) =>
@@ -263,7 +311,7 @@ function App() {
   const weekDates = getWeekDates(weekPick)
   const selectedAddress = addressList.find((a) => a.id === selectedAddressId)
 
-  const firstOpenid = users.find((u) => u.openid.trim())?.openid ?? ''
+  const firstOpenid = users.find((u) => u.enabled && u.openid.trim())?.openid ?? ''
 
   useEffect(() => {
     if (!firstOpenid) {
@@ -293,19 +341,18 @@ function App() {
     }
   }, [weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdBreakfastDinnerInput, stockThresholdLunchInput, selectedAddress])
 
-  const handleStartOrder = useCallback(async () => {
-    const validUsers = users.filter((u) => u.openid.trim())
-    if (validUsers.length === 0) {
-      setStatus({ type: 'error', msg: '请至少添加一个有效用户（填写 OpenID）' })
-      return
+  const validateOrderInputs = useCallback((validUserCount: number): boolean => {
+    if (validUserCount === 0) {
+      setStatus({ type: 'error', msg: '请至少勾选一个有效用户（填写 OpenID）' })
+      return false
     }
     if (selectedWeekdays.length === 0) {
       setStatus({ type: 'error', msg: '请至少选择一天（周一～周五）' })
-      return
+      return false
     }
     if (selectedMealTypes.length === 0) {
       setStatus({ type: 'error', msg: '请至少选择一种餐次（早/午/晚餐）' })
-      return
+      return false
     }
     if (
       matchMode === 'stock' &&
@@ -313,42 +360,76 @@ function App() {
         parseStockThreshold(stockThresholdLunchInput) === null)
     ) {
       setStatus({ type: 'error', msg: '请输入有效的总量数值（≥0 的整数）' })
+      return false
+    }
+    return true
+  }, [matchMode, selectedMealTypes, selectedWeekdays, stockThresholdBreakfastDinnerInput, stockThresholdLunchInput])
+
+  const runSingleUser = useCallback(async (user: UserConfig, shared: Omit<RunOrderTaskParams, 'openid'>) => {
+    const params: RunOrderTaskParams = { ...shared, openid: user.openid.trim() }
+    const results = await runOrderTask(params, (progressResults) => {
+      setUserResults((prev) =>
+        prev.map((ur) => (ur.userId === user.id ? { ...ur, results: [...progressResults] } : ur))
+      )
+    })
+    notifyUserResult(user, results)
+    return results
+  }, [])
+
+  const handleRetryUser = useCallback(async (userId: string) => {
+    const user = users.find((u) => u.id === userId)
+    if (!user || !user.openid.trim()) {
+      setStatus({ type: 'error', msg: '找不到这个用户的有效 OpenID' })
       return
     }
+    if (!user.enabled) {
+      setStatus({ type: 'error', msg: '请先勾选这个用户' })
+      return
+    }
+    if (!validateOrderInputs(1)) return
+
+    const displayName = getUserResultName(user)
+    const shared = getSharedTaskParams()
+
+    setRetryingUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]))
+    setUserResults((prev) =>
+      prev.some((ur) => ur.userId === userId)
+        ? prev.map((ur) => (ur.userId === userId ? { ...ur, nickname: displayName, results: [] } : ur))
+        : [...prev, { userId, nickname: displayName, results: [] }]
+    )
+    setStatus({ type: 'idle', msg: `正在重试 ${displayName}…` })
+
+    try {
+      const results = await runSingleUser(user, shared)
+      const { ordered, noMatch, err } = getResultCounts(results)
+      if (ordered > 0) {
+        setStatus({
+          type: 'success',
+          msg: `重试完成：${displayName}，${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
+        })
+      } else {
+        const failMsg = err > 0 ? `重试完成：${displayName} 无下单成功，${err} 单失败` : `重试完成：${displayName} 全部未匹配`
+        setStatus({ type: err > 0 ? 'error' : 'idle', msg: failMsg })
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '重试失败'
+      setStatus({ type: 'error', msg: `${displayName} ${msg}` })
+    } finally {
+      setRetryingUserIds((prev) => prev.filter((id) => id !== userId))
+    }
+  }, [getSharedTaskParams, runSingleUser, users, validateOrderInputs])
+
+  const handleStartOrder = useCallback(async () => {
+    const validUsers = users.filter((u) => u.enabled && u.openid.trim())
+    if (!validateOrderInputs(validUsers.length)) return
 
     setLoading(true)
-    setUserResults(validUsers.map((u) => ({ userId: u.id, nickname: u.nickname.trim() || u.openid.trim(), results: [] })))
+    setUserResults(validUsers.map((u) => ({ userId: u.id, nickname: getUserResultName(u), results: [] })))
     setStatus({ type: 'idle', msg: `正在为 ${validUsers.length} 位用户点餐…` })
 
     const shared = getSharedTaskParams()
 
-    const promises = validUsers.map((user) => {
-      const params: RunOrderTaskParams = { ...shared, openid: user.openid }
-      return runOrderTask(params, (results) => {
-        setUserResults((prev) =>
-          prev.map((ur) => (ur.userId === user.id ? { ...ur, results: [...results] } : ur))
-        )
-      }).then((results) => {
-        const displayName = user.nickname.trim()
-        const ordered = results.filter((r) => r.status === 'ordered').length
-        const noMatch = results.filter((r) => r.status === 'no_match').length
-        const err = results.filter((r) => r.status === 'error').length
-
-        if (ordered > 0) {
-          const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
-          const detail = results
-            .filter((r) => r.status === 'ordered')
-            .map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`)
-            .join('\n')
-          notifyOnGrabSuccess(FEISHU_WEBHOOK, displayName, summary, detail || '无').catch(() => {})
-        } else {
-          const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
-          notifyOnGrabFail(FEISHU_WEBHOOK, displayName, failSummary).catch(() => {})
-        }
-
-        return results
-      })
-    })
+    const promises = validUsers.map((user) => runSingleUser(user, shared))
 
     const settled = await Promise.allSettled(promises)
 
@@ -378,7 +459,7 @@ function App() {
     }
 
     setLoading(false)
-  }, [users, matchMode, stockThresholdBreakfastDinnerInput, stockThresholdLunchInput, selectedWeekdays, selectedMealTypes, getSharedTaskParams])
+  }, [getSharedTaskParams, runSingleUser, users, validateOrderInputs])
 
   return (
     <ConfigProvider locale={zhCN}>
@@ -391,6 +472,14 @@ function App() {
         <h2 className="section-title">用户</h2>
         {users.map((user, idx) => (
           <div key={user.id} className="user-row">
+            <label className="user-row__enabled" title="是否参与本次点餐">
+              <input
+                type="checkbox"
+                checked={user.enabled}
+                onChange={() => toggleUserEnabled(user.id)}
+              />
+              <span>抢</span>
+            </label>
             <span className="user-row__index">{idx + 1}</span>
             <input
               type="text"
@@ -550,7 +639,7 @@ function App() {
             type="button"
             className="btn btn-secondary"
             onClick={() => void handleStartOrder()}
-            disabled={loading}
+            disabled={loading || retryingUserIds.length > 0}
             style={{ width: '100%', flex: '1 1 auto' }}
           >
             {loading ? '点餐中…' : '开始点餐'}
@@ -561,27 +650,42 @@ function App() {
         </p>
       </section>
 
-      {userResults.length > 0 && userResults.map((ur) => (
-        <section key={ur.userId} className="section">
-          <h2 className="section-title">执行结果 — {ur.nickname}</h2>
-          {ur.results.length === 0 ? (
-            <p className="status">等待中…</p>
-          ) : (
-            <ul className="run-result-list">
-              {ur.results.map((r, i) => (
-                <li key={`${r.date}-${r.mealType}-${i}`} className={`run-result run-result--${r.status}`}>
-                  <span className="run-result__day">{r.dateLabel} {r.mealTypeLabel}（{r.date}）</span>
-                  <span className="run-result__msg">
-                    {r.status === 'ordered' && (r.packageName ?? r.message)}
-                    {r.status === 'no_match' && (r.message ?? '未匹配')}
-                    {r.status === 'error' && (r.message ?? '失败')}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      ))}
+      {userResults.length > 0 && userResults.map((ur) => {
+        const isRetrying = retryingUserIds.includes(ur.userId)
+        const user = users.find((u) => u.id === ur.userId)
+        const canRetry = Boolean(user?.enabled && user.openid.trim())
+        return (
+          <section key={ur.userId} className="section">
+            <div className="result-section-header">
+              <h2 className="section-title">执行结果 — {ur.nickname}</h2>
+              <button
+                type="button"
+                className="btn btn-secondary btn-chip"
+                onClick={() => void handleRetryUser(ur.userId)}
+                disabled={loading || isRetrying || !canRetry}
+              >
+                {isRetrying ? '重试中…' : '重试此人'}
+              </button>
+            </div>
+            {ur.results.length === 0 ? (
+              <p className="status">等待中…</p>
+            ) : (
+              <ul className="run-result-list">
+                {ur.results.map((r, i) => (
+                  <li key={`${r.date}-${r.mealType}-${i}`} className={`run-result run-result--${r.status}`}>
+                    <span className="run-result__day">{r.dateLabel} {r.mealTypeLabel}（{r.date}）</span>
+                    <span className="run-result__msg">
+                      {r.status === 'ordered' && (r.packageName ?? r.message)}
+                      {r.status === 'no_match' && (r.message ?? '未匹配')}
+                      {r.status === 'error' && (r.message ?? '失败')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )
+      })}
 
       {status.msg && (
         <p className={`status ${status.type}`}>{status.msg}</p>
