@@ -1,0 +1,194 @@
+name: Deploy to k3s
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TCR_REGISTRY: ccr.ccs.tencentyun.com
+  TCR_NAMESPACE: zzzspace
+  IMAGE_REPOSITORY: my-app
+  APP_NAME: kuang-eat
+  K8S_NAMESPACE: kuang-eat
+  K8S_REPLICAS: "1"
+  K8S_NODE_PORT: "30080"
+  SERVER_PORT: ${{ vars.SERVER_PORT || '22' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        id: image
+        run: |
+          IMAGE="$(echo "${TCR_REGISTRY}/${TCR_NAMESPACE}/${IMAGE_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${IMAGE}:${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to TCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.TCR_REGISTRY }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Build image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --tag "${{ steps.image.outputs.tag }}" \
+            .
+
+      - name: Push image
+        timeout-minutes: 10
+        run: |
+          docker push "${{ steps.image.outputs.tag }}"
+
+      - name: Add server SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
+
+      - name: Trust server host key
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          if [ -z "${SERVER_HOST}" ]; then
+            echo "Missing required secret: SERVER_HOST" >&2
+            exit 1
+          fi
+
+          mkdir -p "${HOME}/.ssh"
+          ssh-keyscan -p "${SERVER_PORT}" "${SERVER_HOST}" >> "${HOME}/.ssh/known_hosts"
+
+      - name: Deploy to k3s
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+        run: |
+          for name in SERVER_HOST SERVER_USER TCR_USERNAME TCR_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required secret: ${name}" >&2
+              exit 1
+            fi
+          done
+
+          b64() {
+            printf '%s' "$1" | base64 -w 0
+          }
+
+          TCR_USERNAME_B64="$(b64 "${TCR_USERNAME}")"
+          TCR_PASSWORD_B64="$(b64 "${TCR_PASSWORD}")"
+
+          ssh -p "${SERVER_PORT}" "${SERVER_USER}@${SERVER_HOST}" \
+            "APP_NAME=$(printf '%q' "${APP_NAME}") \
+            K8S_NAMESPACE=$(printf '%q' "${K8S_NAMESPACE}") \
+            K8S_REPLICAS=$(printf '%q' "${K8S_REPLICAS}") \
+            K8S_NODE_PORT=$(printf '%q' "${K8S_NODE_PORT}") \
+            IMAGE=$(printf '%q' "${IMAGE}") \
+            TCR_REGISTRY=$(printf '%q' "${TCR_REGISTRY}") \
+            TCR_USERNAME_B64=$(printf '%q' "${TCR_USERNAME_B64}") \
+            TCR_PASSWORD_B64=$(printf '%q' "${TCR_PASSWORD_B64}") \
+            bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          if command -v kubectl >/dev/null 2>&1; then
+            KUBECTL=(kubectl)
+          else
+            KUBECTL=(sudo k3s kubectl)
+          fi
+
+          TCR_USERNAME="$(printf '%s' "${TCR_USERNAME_B64}" | base64 -d)"
+          TCR_PASSWORD="$(printf '%s' "${TCR_PASSWORD_B64}" | base64 -d)"
+
+          "${KUBECTL[@]}" create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f -
+
+          "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" create secret docker-registry tcr-pull-secret \
+            --docker-server="${TCR_REGISTRY}" \
+            --docker-username="${TCR_USERNAME}" \
+            --docker-password="${TCR_PASSWORD}" \
+            --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f -
+
+          cat <<EOF | "${KUBECTL[@]}" apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${K8S_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: ${APP_NAME}
+          spec:
+            replicas: ${K8S_REPLICAS}
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: ${APP_NAME}
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: ${APP_NAME}
+              spec:
+                imagePullSecrets:
+                  - name: tcr-pull-secret
+                containers:
+                  - name: ${APP_NAME}
+                    image: ${IMAGE}
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - name: http
+                        containerPort: 8080
+                    readinessProbe:
+                      httpGet:
+                        path: /
+                        port: http
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      httpGet:
+                        path: /
+                        port: http
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 500m
+                        memory: 256Mi
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${K8S_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: ${APP_NAME}
+          spec:
+            type: NodePort
+            selector:
+              app.kubernetes.io/name: ${APP_NAME}
+            ports:
+              - name: http
+                port: 80
+                targetPort: http
+                nodePort: ${K8S_NODE_PORT}
+          EOF
+
+          "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" rollout status "deployment/${APP_NAME}" --timeout=180s
+          REMOTE
