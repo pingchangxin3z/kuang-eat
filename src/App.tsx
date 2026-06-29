@@ -2,21 +2,14 @@ import { useState, useCallback, useEffect } from 'react'
 import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 
-import { getMenu, createOrder, getAddressList } from '@/api/order'
-import { parseKeywords, matchFirstMenuItem, matchFirstByStockCount } from '@/utils/keywords'
+import { getAddressList } from '@/api/order'
+import { cancelMonitor, getMonitorStatuses, registerMonitor, type MonitorUserStatus } from '@/api/monitor'
 import { getWeekDates, getWeekdayLabel } from '@/utils/week'
-import { notifyOnGrabSuccess, notifyOnGrabFail } from '@/utils/notify'
-import type { AddressItem, MenuItem } from '@/types/order'
+import type { AddressItem } from '@/types/order'
 
 const USERS_KEY = 'kuang-eat-users'
 const OPENID_KEY = 'kuang-eat-openid'
 const NICKNAME_KEY = 'kuang-eat-nickname'
-
-const FEISHU_WEBHOOK = (import.meta.env.VITE_FEISHU_WEBHOOK ?? '').trim()
-
-function toMealDate(dateStr: string): string {
-  return dateStr ? dateStr.replace(/-/g, '') : ''
-}
 
 function parseStockThreshold(input: string): number | null {
   const s = input.trim()
@@ -41,122 +34,7 @@ const MATCH_MODE_OPTIONS = [
   { value: 'stock' as const, label: '按总量' }
 ]
 
-interface RunDayResult {
-  date: string
-  dateLabel: string
-  mealType: 1 | 2 | 3
-  mealTypeLabel: string
-  status: 'ordered' | 'no_match' | 'error'
-  message?: string
-  packageName?: string
-}
-
-interface RunOrderTaskParams {
-  openid: string
-  weekPick: string
-  selectedWeekdays: number[]
-  selectedMealTypes: (1 | 2 | 3)[]
-  matchMode: 'keywords' | 'stock'
-  keywords: string
-  stockThresholdBreakfastDinner: number
-  stockThresholdLunch: number
-  addressId: number
-  addressDetail: string
-}
-
-async function runOrderTask(
-  params: RunOrderTaskParams,
-  onProgress?: (results: RunDayResult[]) => void
-): Promise<RunDayResult[]> {
-  const {
-    openid,
-    weekPick,
-    selectedWeekdays,
-    selectedMealTypes,
-    matchMode,
-    keywords,
-    stockThresholdBreakfastDinner,
-    stockThresholdLunch,
-    addressId,
-    addressDetail
-  } = params
-  const weekDates = getWeekDates(weekPick)
-  const kw = parseKeywords(keywords)
-  const sortedDays = [...selectedWeekdays].sort((a, b) => a - b)
-  const sortedMealTypes = [...selectedMealTypes].sort((a, b) => a - b)
-
-  const tasks: { dayIndex: number; dateStr: string; dateLabel: string; mealType: 1 | 2 | 3; mealTypeLabel: string }[] = []
-  for (const dayIndex of sortedDays) {
-    const dateStr = weekDates[dayIndex]
-    const dateLabel = getWeekdayLabel(dayIndex)
-    for (const mealType of sortedMealTypes) {
-      const mealTypeLabel = MEAL_OPTIONS.find((o) => o.value === mealType)?.label ?? ''
-      tasks.push({ dayIndex, dateStr, dateLabel, mealType, mealTypeLabel })
-    }
-  }
-
-  const results: RunDayResult[] = []
-
-  for (const t of tasks) {
-    const { dateStr, dateLabel, mealType, mealTypeLabel } = t
-    const threshold =
-      mealType === 2 ? stockThresholdLunch : stockThresholdBreakfastDinner
-
-    let list: MenuItem[] = []
-    try {
-      const res = await getMenu(mealType, toMealDate(dateStr), openid)
-      list = res.data ?? []
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : '获取菜单失败'
-      results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'error', message: msg })
-      onProgress?.([...results])
-      continue
-    }
-
-    const matched =
-      matchMode === 'keywords'
-        ? matchFirstMenuItem(list, kw)
-        : matchFirstByStockCount(list, threshold)
-
-    if (matched) {
-      try {
-        const orderRes = await createOrder(
-          {
-            mealType: String(matched.mealType),
-            orderDate: String(matched.mealDate),
-            packageName: matched.packageName,
-            sequenceChar: matched.sequenceChar
-          },
-          openid,
-          addressId,
-          addressDetail
-        )
-        if (orderRes.code === 200) {
-          results.push({
-            date: dateStr, dateLabel, mealType, mealTypeLabel,
-            status: 'ordered',
-            message: orderRes.msg ?? '已下单',
-            packageName: matched.packageName.replace(/\n/g, ' ')
-          })
-        } else {
-          results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'error', message: orderRes.msg ?? '下单失败' })
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : '下单请求失败'
-        results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'error', message: msg })
-      }
-    } else {
-      const noMatchMsg =
-        matchMode === 'keywords'
-          ? (list.length === 0 ? '暂无菜单' : '未匹配到关键词')
-          : (list.length === 0 ? '暂无菜单' : `无总量 ≤ ${threshold} 的套餐`)
-      results.push({ date: dateStr, dateLabel, mealType, mealTypeLabel, status: 'no_match', message: noMatchMsg })
-    }
-    onProgress?.([...results])
-  }
-
-  return results
-}
+type MonitorStatusState = 'idle' | 'loading' | 'monitored' | 'disabled' | 'missing' | 'error'
 
 /* ─── 多用户配置 ─── */
 
@@ -165,41 +43,6 @@ interface UserConfig {
   openid: string
   nickname: string
   enabled: boolean
-}
-
-interface UserRunResult {
-  userId: string
-  nickname: string
-  results: RunDayResult[]
-}
-
-function getUserResultName(user: UserConfig): string {
-  return user.nickname.trim() || user.openid.trim()
-}
-
-function getResultCounts(results: RunDayResult[]): { ordered: number; noMatch: number; err: number } {
-  return {
-    ordered: results.filter((r) => r.status === 'ordered').length,
-    noMatch: results.filter((r) => r.status === 'no_match').length,
-    err: results.filter((r) => r.status === 'error').length
-  }
-}
-
-function notifyUserResult(user: UserConfig, results: RunDayResult[]): void {
-  const displayName = user.nickname.trim()
-  const { ordered, noMatch, err } = getResultCounts(results)
-
-  if (ordered > 0) {
-    const summary = `完成：${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
-    const detail = results
-      .filter((r) => r.status === 'ordered')
-      .map((r) => `${r.dateLabel} ${r.mealTypeLabel}：${r.packageName ?? ''}`)
-      .join('\n')
-    notifyOnGrabSuccess(FEISHU_WEBHOOK, displayName, summary, detail || '无').catch(() => {})
-  } else {
-    const failSummary = err > 0 ? `无下单成功，${err} 单失败` : '全部未匹配'
-    notifyOnGrabFail(FEISHU_WEBHOOK, displayName, failSummary).catch(() => {})
-  }
 }
 
 function generateId(): string {
@@ -239,6 +82,27 @@ function persistUsers(users: UserConfig[]): void {
   try { localStorage.setItem(USERS_KEY, JSON.stringify(users)) } catch { /* ignore */ }
 }
 
+function statusForUser(user: UserConfig, statuses: Record<string, MonitorUserStatus>, loading: boolean, error: boolean): MonitorStatusState {
+  const openid = user.openid.trim()
+  if (!openid) return 'idle'
+  if (loading) return 'loading'
+  if (error) return 'error'
+  const status = statuses[openid]
+  if (!status || !status.monitored) return 'missing'
+  return status.enabled ? 'monitored' : 'disabled'
+}
+
+function getStatusLabel(status: MonitorStatusState): string {
+  switch (status) {
+    case 'loading': return '查询中'
+    case 'monitored': return '监控中'
+    case 'disabled': return '已停用'
+    case 'missing': return '未监控'
+    case 'error': return '查询失败'
+    default: return '未填写'
+  }
+}
+
 /* ─── App ─── */
 
 function App() {
@@ -256,12 +120,14 @@ function App() {
     return d.toISOString().slice(0, 10)
   })
   const [selectedWeekdays, setSelectedWeekdays] = useState<number[]>([0, 1, 2, 3, 4])
-  const [loading, setLoading] = useState(false)
-  const [retryingUserIds, setRetryingUserIds] = useState<string[]>([])
-  const [userResults, setUserResults] = useState<UserRunResult[]>([])
+  const [savingMonitor, setSavingMonitor] = useState(false)
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; msg: string }>({ type: 'idle', msg: '' })
   const [addressList, setAddressList] = useState<AddressItem[]>([])
   const [selectedAddressId, setSelectedAddressId] = useState<number | null>(118)
+  const [monitorStatuses, setMonitorStatuses] = useState<Record<string, MonitorUserStatus>>({})
+  const [loadingMonitorStatus, setLoadingMonitorStatus] = useState(false)
+  const [monitorStatusError, setMonitorStatusError] = useState(false)
+  const [cancellingOpenids, setCancellingOpenids] = useState<string[]>([])
 
   const updateUsers = useCallback((next: UserConfig[]) => {
     setUsers(next)
@@ -312,6 +178,34 @@ function App() {
   const selectedAddress = addressList.find((a) => a.id === selectedAddressId)
 
   const firstOpenid = users.find((u) => u.enabled && u.openid.trim())?.openid ?? ''
+  const userOpenidKey = users.map((u) => u.openid.trim()).filter(Boolean).join('|')
+
+  const refreshMonitorStatuses = useCallback(async () => {
+    const openids = [...new Set(users.map((u) => u.openid.trim()).filter(Boolean))]
+    if (openids.length === 0) {
+      setMonitorStatuses({})
+      setLoadingMonitorStatus(false)
+      setMonitorStatusError(false)
+      return
+    }
+    setLoadingMonitorStatus(true)
+    setMonitorStatusError(false)
+    try {
+      const res = await getMonitorStatuses(openids)
+      setMonitorStatuses(Object.fromEntries(res.statuses.map((item) => [item.openid, item])))
+    } catch {
+      setMonitorStatusError(true)
+    } finally {
+      setLoadingMonitorStatus(false)
+    }
+  }, [users])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshMonitorStatuses()
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [refreshMonitorStatuses, userOpenidKey])
 
   useEffect(() => {
     if (!firstOpenid) {
@@ -323,7 +217,7 @@ function App() {
       .catch(() => setAddressList([]))
   }, [firstOpenid])
 
-  const getSharedTaskParams = useCallback((): Omit<RunOrderTaskParams, 'openid'> => {
+  const getMonitorSettings = useCallback(() => {
     const stockThresholdBreakfastDinner =
       matchMode === 'stock' ? (parseStockThreshold(stockThresholdBreakfastDinnerInput) ?? 0) : 0
     const stockThresholdLunch =
@@ -341,7 +235,7 @@ function App() {
     }
   }, [weekPick, selectedWeekdays, selectedMealTypes, matchMode, keywords, stockThresholdBreakfastDinnerInput, stockThresholdLunchInput, selectedAddress])
 
-  const validateOrderInputs = useCallback((validUserCount: number): boolean => {
+  const validateMonitorInputs = useCallback((validUserCount: number): boolean => {
     if (validUserCount === 0) {
       setStatus({ type: 'error', msg: '请至少勾选一个有效用户（填写 OpenID）' })
       return false
@@ -365,113 +259,79 @@ function App() {
     return true
   }, [matchMode, selectedMealTypes, selectedWeekdays, stockThresholdBreakfastDinnerInput, stockThresholdLunchInput])
 
-  const runSingleUser = useCallback(async (user: UserConfig, shared: Omit<RunOrderTaskParams, 'openid'>) => {
-    const params: RunOrderTaskParams = { ...shared, openid: user.openid.trim() }
-    const results = await runOrderTask(params, (progressResults) => {
-      setUserResults((prev) =>
-        prev.map((ur) => (ur.userId === user.id ? { ...ur, results: [...progressResults] } : ur))
-      )
-    })
-    notifyUserResult(user, results)
-    return results
-  }, [])
+  const handleStartMonitor = useCallback(async () => {
+    const monitorUsers = users.filter((u) => u.openid.trim())
+    const enabledUserCount = monitorUsers.filter((u) => u.enabled).length
+    if (!validateMonitorInputs(enabledUserCount)) return
 
-  const handleRetryUser = useCallback(async (userId: string) => {
-    const user = users.find((u) => u.id === userId)
-    if (!user || !user.openid.trim()) {
-      setStatus({ type: 'error', msg: '找不到这个用户的有效 OpenID' })
-      return
-    }
-    if (!user.enabled) {
-      setStatus({ type: 'error', msg: '请先勾选这个用户' })
-      return
-    }
-    if (!validateOrderInputs(1)) return
-
-    const displayName = getUserResultName(user)
-    const shared = getSharedTaskParams()
-
-    setRetryingUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]))
-    setUserResults((prev) =>
-      prev.some((ur) => ur.userId === userId)
-        ? prev.map((ur) => (ur.userId === userId ? { ...ur, nickname: displayName, results: [] } : ur))
-        : [...prev, { userId, nickname: displayName, results: [] }]
-    )
-    setStatus({ type: 'idle', msg: `正在重试 ${displayName}…` })
-
+    setSavingMonitor(true)
+    setStatus({ type: 'idle', msg: `正在登记 ${monitorUsers.length} 位用户的监控配置…` })
     try {
-      const results = await runSingleUser(user, shared)
-      const { ordered, noMatch, err } = getResultCounts(results)
-      if (ordered > 0) {
-        setStatus({
-          type: 'success',
-          msg: `重试完成：${displayName}，${ordered} 单下单，${noMatch} 单未匹配${err > 0 ? `，${err} 单失败` : ''}`
-        })
-      } else {
-        const failMsg = err > 0 ? `重试完成：${displayName} 无下单成功，${err} 单失败` : `重试完成：${displayName} 全部未匹配`
-        setStatus({ type: err > 0 ? 'error' : 'idle', msg: failMsg })
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : '重试失败'
-      setStatus({ type: 'error', msg: `${displayName} ${msg}` })
-    } finally {
-      setRetryingUserIds((prev) => prev.filter((id) => id !== userId))
-    }
-  }, [getSharedTaskParams, runSingleUser, users, validateOrderInputs])
-
-  const handleStartOrder = useCallback(async () => {
-    const validUsers = users.filter((u) => u.enabled && u.openid.trim())
-    if (!validateOrderInputs(validUsers.length)) return
-
-    setLoading(true)
-    setUserResults(validUsers.map((u) => ({ userId: u.id, nickname: getUserResultName(u), results: [] })))
-    setStatus({ type: 'idle', msg: `正在为 ${validUsers.length} 位用户点餐…` })
-
-    const shared = getSharedTaskParams()
-
-    const promises = validUsers.map((user) => runSingleUser(user, shared))
-
-    const settled = await Promise.allSettled(promises)
-
-    let totalOrdered = 0
-    let totalNoMatch = 0
-    let totalErr = 0
-    for (const s of settled) {
-      if (s.status === 'fulfilled') {
-        for (const r of s.value) {
-          if (r.status === 'ordered') totalOrdered++
-          else if (r.status === 'no_match') totalNoMatch++
-          else totalErr++
-        }
-      } else {
-        totalErr++
-      }
-    }
-
-    if (totalOrdered > 0) {
+      await registerMonitor({
+        users: monitorUsers.map((user) => ({
+          id: user.id,
+          openid: user.openid.trim(),
+          nickname: user.nickname.trim(),
+          enabled: user.enabled
+        })),
+        settings: getMonitorSettings()
+      })
       setStatus({
         type: 'success',
-        msg: `完成：${validUsers.length} 人，${totalOrdered} 单下单，${totalNoMatch} 单未匹配${totalErr > 0 ? `，${totalErr} 单失败` : ''}`
+        msg:
+          enabledUserCount > 1
+            ? `当前提交的 ${enabledUserCount} 个 OpenID 已在监控中。等待飞书请求后端触发接口。`
+            : '当前 OpenID 已在监控中。等待飞书请求后端触发接口。'
       })
-    } else {
-      const failMsg = totalErr > 0 ? `无下单成功，${totalErr} 单失败` : '全部未匹配'
-      setStatus({ type: totalErr > 0 ? 'error' : 'idle', msg: failMsg })
+      await refreshMonitorStatuses()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '发起监控失败'
+      setStatus({ type: 'error', msg })
+    } finally {
+      setSavingMonitor(false)
     }
+  }, [getMonitorSettings, refreshMonitorStatuses, users, validateMonitorInputs])
 
-    setLoading(false)
-  }, [getSharedTaskParams, runSingleUser, users, validateOrderInputs])
+  const handleCancelMonitor = useCallback(async (user: UserConfig) => {
+    const openid = user.openid.trim()
+    if (!openid) return
+    if (!window.confirm('确认取消这个 OpenID 的监控吗？')) return
+
+    setCancellingOpenids((prev) => (prev.includes(openid) ? prev : [...prev, openid]))
+    setStatus({ type: 'idle', msg: '正在取消监控…' })
+    try {
+      const res = await cancelMonitor([openid])
+      setMonitorStatuses((prev) => ({
+        ...prev,
+        ...Object.fromEntries(res.statuses.map((item) => [item.openid, item]))
+      }))
+      updateUsers(users.map((item) => (item.id === user.id ? { ...item, enabled: false } : item)))
+      setStatus({ type: 'success', msg: '当前 OpenID 已取消监控。' })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '取消监控失败'
+      setStatus({ type: 'error', msg })
+    } finally {
+      setCancellingOpenids((prev) => prev.filter((item) => item !== openid))
+    }
+  }, [updateUsers, users])
 
   return (
     <ConfigProvider locale={zhCN}>
     <div className="app-layout">
       <div className="app-main">
       <h1 className="page-title">狂吃</h1>
-      <p className="page-desc">选择工作日、餐次与匹配规则，点击「开始点餐」立即拉取菜单并下单</p>
+      <p className="page-desc">选择工作日、餐次与匹配规则，点击「发起监控」保存到后端；飞书请求触发接口后才会执行抢饭</p>
 
       <section className="section">
         <h2 className="section-title">用户</h2>
         {users.map((user, idx) => (
           <div key={user.id} className="user-row">
+            {(() => {
+              const rowStatus = statusForUser(user, monitorStatuses, loadingMonitorStatus, monitorStatusError)
+              const openid = user.openid.trim()
+              const cancelling = cancellingOpenids.includes(openid)
+              return (
+                <>
             <label className="user-row__enabled" title="是否参与本次点餐">
               <input
                 type="checkbox"
@@ -495,6 +355,18 @@ function App() {
               placeholder="昵称"
               className="user-row__nickname"
             />
+            <span className={`user-row__monitor-status user-row__monitor-status--${rowStatus}`}>
+              {getStatusLabel(rowStatus)}
+            </span>
+            <button
+              type="button"
+              className="btn btn-chip user-row__cancel"
+              onClick={() => void handleCancelMonitor(user)}
+              disabled={rowStatus !== 'monitored' || cancelling}
+              title="取消此 OpenID 的监控"
+            >
+              {cancelling ? '取消中' : '取消监控'}
+            </button>
             <button
               type="button"
               className="btn btn-chip user-row__remove"
@@ -503,6 +375,9 @@ function App() {
             >
               删除
             </button>
+                </>
+              )
+            })()}
           </div>
         ))}
         <button type="button" className="btn btn-secondary" style={{ marginTop: '0.5rem' }} onClick={addUser}>
@@ -638,54 +513,17 @@ function App() {
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={() => void handleStartOrder()}
-            disabled={loading || retryingUserIds.length > 0}
+            onClick={() => void handleStartMonitor()}
+            disabled={savingMonitor}
             style={{ width: '100%', flex: '1 1 auto' }}
           >
-            {loading ? '点餐中…' : '开始点餐'}
+            {savingMonitor ? '登记中…' : '发起监控'}
           </button>
         </div>
         <p className="input-hint" style={{ marginTop: '0.5rem' }}>
-          按当前偏好立即为所有用户拉取各天各餐菜单并尝试下单；各用户并行执行、互不影响。
+          后端会保存当前配置；飞书请求后端触发接口时，才会按这份配置为已勾选用户执行抢饭。
         </p>
       </section>
-
-      {userResults.length > 0 && userResults.map((ur) => {
-        const isRetrying = retryingUserIds.includes(ur.userId)
-        const user = users.find((u) => u.id === ur.userId)
-        const canRetry = Boolean(user?.enabled && user.openid.trim())
-        return (
-          <section key={ur.userId} className="section">
-            <div className="result-section-header">
-              <h2 className="section-title">执行结果 — {ur.nickname}</h2>
-              <button
-                type="button"
-                className="btn btn-secondary btn-chip"
-                onClick={() => void handleRetryUser(ur.userId)}
-                disabled={loading || isRetrying || !canRetry}
-              >
-                {isRetrying ? '重试中…' : '重试此人'}
-              </button>
-            </div>
-            {ur.results.length === 0 ? (
-              <p className="status">等待中…</p>
-            ) : (
-              <ul className="run-result-list">
-                {ur.results.map((r, i) => (
-                  <li key={`${r.date}-${r.mealType}-${i}`} className={`run-result run-result--${r.status}`}>
-                    <span className="run-result__day">{r.dateLabel} {r.mealTypeLabel}（{r.date}）</span>
-                    <span className="run-result__msg">
-                      {r.status === 'ordered' && (r.packageName ?? r.message)}
-                      {r.status === 'no_match' && (r.message ?? '未匹配')}
-                      {r.status === 'error' && (r.message ?? '失败')}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        )
-      })}
 
       {status.msg && (
         <p className={`status ${status.type}`}>{status.msg}</p>

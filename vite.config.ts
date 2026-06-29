@@ -12,6 +12,10 @@ export default defineConfig({
   server: {
     port: 4173,
     proxy: {
+      '/api': {
+        target: 'http://localhost:8787',
+        changeOrigin: true
+      },
       '/feishu-api': {
         target: 'https://order.hersweetie.com',
         changeOrigin: true

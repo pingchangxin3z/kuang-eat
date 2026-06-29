@@ -81,8 +81,12 @@ jobs:
           SERVER_USER: ${{ secrets.SERVER_USER }}
           TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          MONITOR_FEISHU_WEBHOOK: ${{ secrets.MONITOR_FEISHU_WEBHOOK }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MONITOR_TRIGGER_SECRET: ${{ secrets.MONITOR_TRIGGER_SECRET }}
+          PGSSL: ${{ vars.PGSSL || 'false' }}
         run: |
-          for name in SERVER_HOST SERVER_USER TCR_USERNAME TCR_PASSWORD; do
+          for name in SERVER_HOST SERVER_USER TCR_USERNAME TCR_PASSWORD MONITOR_FEISHU_WEBHOOK DATABASE_URL; do
             if [ -z "${!name}" ]; then
               echo "Missing required secret: ${name}" >&2
               exit 1
@@ -95,6 +99,9 @@ jobs:
 
           TCR_USERNAME_B64="$(b64 "${TCR_USERNAME}")"
           TCR_PASSWORD_B64="$(b64 "${TCR_PASSWORD}")"
+          MONITOR_FEISHU_WEBHOOK_B64="$(b64 "${MONITOR_FEISHU_WEBHOOK}")"
+          DATABASE_URL_B64="$(b64 "${DATABASE_URL}")"
+          MONITOR_TRIGGER_SECRET_B64="$(b64 "${MONITOR_TRIGGER_SECRET}")"
 
           ssh -p "${SERVER_PORT}" "${SERVER_USER}@${SERVER_HOST}" \
             "APP_NAME=$(printf '%q' "${APP_NAME}") \
@@ -105,6 +112,10 @@ jobs:
             TCR_REGISTRY=$(printf '%q' "${TCR_REGISTRY}") \
             TCR_USERNAME_B64=$(printf '%q' "${TCR_USERNAME_B64}") \
             TCR_PASSWORD_B64=$(printf '%q' "${TCR_PASSWORD_B64}") \
+            MONITOR_FEISHU_WEBHOOK_B64=$(printf '%q' "${MONITOR_FEISHU_WEBHOOK_B64}") \
+            DATABASE_URL_B64=$(printf '%q' "${DATABASE_URL_B64}") \
+            MONITOR_TRIGGER_SECRET_B64=$(printf '%q' "${MONITOR_TRIGGER_SECRET_B64}") \
+            PGSSL=$(printf '%q' "${PGSSL}") \
             bash -s" <<'REMOTE'
           set -euo pipefail
 
@@ -124,6 +135,21 @@ jobs:
             --docker-username="${TCR_USERNAME}" \
             --docker-password="${TCR_PASSWORD}" \
             --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f -
+
+          cat <<EOF | "${KUBECTL[@]}" apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ${APP_NAME}-env
+            namespace: ${K8S_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: ${APP_NAME}
+          type: Opaque
+          data:
+            MONITOR_FEISHU_WEBHOOK: "${MONITOR_FEISHU_WEBHOOK_B64}"
+            DATABASE_URL: "${DATABASE_URL_B64}"
+            MONITOR_TRIGGER_SECRET: "${MONITOR_TRIGGER_SECRET_B64}"
+          EOF
 
           cat <<EOF | "${KUBECTL[@]}" apply -f -
           apiVersion: apps/v1
@@ -152,15 +178,35 @@ jobs:
                     ports:
                       - name: http
                         containerPort: 8080
+                    env:
+                      - name: STORAGE_DRIVER
+                        value: postgres
+                      - name: DATABASE_URL
+                        valueFrom:
+                          secretKeyRef:
+                            name: ${APP_NAME}-env
+                            key: DATABASE_URL
+                      - name: PGSSL
+                        value: "${PGSSL}"
+                      - name: MONITOR_FEISHU_WEBHOOK
+                        valueFrom:
+                          secretKeyRef:
+                            name: ${APP_NAME}-env
+                            key: MONITOR_FEISHU_WEBHOOK
+                      - name: MONITOR_TRIGGER_SECRET
+                        valueFrom:
+                          secretKeyRef:
+                            name: ${APP_NAME}-env
+                            key: MONITOR_TRIGGER_SECRET
                     readinessProbe:
                       httpGet:
-                        path: /
+                        path: /health
                         port: http
                       initialDelaySeconds: 5
                       periodSeconds: 10
                     livenessProbe:
                       httpGet:
-                        path: /
+                        path: /health
                         port: http
                       initialDelaySeconds: 15
                       periodSeconds: 20
