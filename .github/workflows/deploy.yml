@@ -236,5 +236,29 @@ jobs:
                 nodePort: ${K8S_NODE_PORT}
           EOF
 
-          "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" rollout status "deployment/${APP_NAME}" --timeout=180s
+          if ! "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" rollout status "deployment/${APP_NAME}" --timeout=300s; then
+            echo "::group::deployment"
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" get deployment "${APP_NAME}" -o wide || true
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" describe deployment "${APP_NAME}" || true
+            echo "::endgroup::"
+
+            echo "::group::replicasets"
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" get rs -l "app.kubernetes.io/name=${APP_NAME}" -o wide || true
+            echo "::endgroup::"
+
+            echo "::group::pods"
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" get pods -l "app.kubernetes.io/name=${APP_NAME}" -o wide || true
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" describe pods -l "app.kubernetes.io/name=${APP_NAME}" || true
+            echo "::endgroup::"
+
+            echo "::group::logs"
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" logs -l "app.kubernetes.io/name=${APP_NAME}" --tail=200 --all-containers=true || true
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" logs -l "app.kubernetes.io/name=${APP_NAME}" --tail=200 --all-containers=true --previous || true
+            echo "::endgroup::"
+
+            echo "::group::events"
+            "${KUBECTL[@]}" -n "${K8S_NAMESPACE}" get events --sort-by=.lastTimestamp || true
+            echo "::endgroup::"
+            exit 1
+          fi
           REMOTE
