@@ -53,7 +53,7 @@ jobs:
             .
 
       - name: Push image
-        timeout-minutes: 10
+        timeout-minutes: 30
         run: |
           docker push "${{ steps.image.outputs.tag }}"
 
