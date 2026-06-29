@@ -57,6 +57,42 @@ export async function triggerGrab(): Promise<TriggerResponse> {
   return (await res.json()) as TriggerResponse
 }
 
+export async function stopJob(jobId: string): Promise<GetJobResponse> {
+  const res = await fetch(`${BACKEND_BASE}/api/jobs/${jobId}/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Monitor-Secret': getAdminKey()
+    },
+    body: JSON.stringify({})
+  })
+  return (await res.json()) as GetJobResponse
+}
+
+export async function retryJob(jobId: string): Promise<TriggerResponse> {
+  const res = await fetch(`${BACKEND_BASE}/api/jobs/${jobId}/retry`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Monitor-Secret': getAdminKey()
+    },
+    body: JSON.stringify({})
+  })
+  return (await res.json()) as TriggerResponse
+}
+
+export async function retryJobUser(jobId: string, openid: string): Promise<TriggerResponse> {
+  const res = await fetch(`${BACKEND_BASE}/api/jobs/${jobId}/retry-user`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Monitor-Secret': getAdminKey()
+    },
+    body: JSON.stringify({ openid })
+  })
+  return (await res.json()) as TriggerResponse
+}
+
 export async function getAdminSettings(): Promise<AdminSettingsResponse> {
   const res = await fetch(`${BACKEND_BASE}/api/admin/settings`, {
     headers: {

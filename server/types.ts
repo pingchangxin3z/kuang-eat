@@ -33,12 +33,12 @@ export interface MonitorUserStatus {
   nickname: string
 }
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 export interface JobResult {
   monitorId: string
   startedAt: string
-  finishedAt: string
+  finishedAt: string | null
   counts: ResultCounts
   users: UserResult[]
 }

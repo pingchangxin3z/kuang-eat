@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Button, Card, Table, Tag, Input, Space, Typography, Alert, Descriptions, message, Popconfirm, Switch } from 'antd'
 import {
   triggerGrab,
+  stopJob,
+  retryJob,
+  retryJobUser,
   listJobs,
   getJob,
   getActiveMonitor,
@@ -19,7 +22,8 @@ const STATUS_TAG: Record<string, { color: string; label: string }> = {
   queued: { color: 'blue', label: '排队中' },
   running: { color: 'processing', label: '执行中' },
   succeeded: { color: 'success', label: '成功' },
-  failed: { color: 'error', label: '失败' }
+  failed: { color: 'error', label: '失败' },
+  canceled: { color: 'default', label: '已停止' }
 }
 
 const MEAL_LABELS: Record<number, string> = { 1: '早餐', 2: '午餐', 3: '晚餐' }
@@ -40,6 +44,10 @@ function summarizeUserResult(result: UserResult | undefined): string {
   return `成功${result.counts.ordered || 0} / 未匹配${result.counts.no_match || 0} / 失败${result.counts.error || 0}`
 }
 
+function isTerminalJob(job: Job | null): boolean {
+  return !!job && ['succeeded', 'failed', 'canceled'].includes(job.status)
+}
+
 function AdminPage() {
   const [authed, setAuthed] = useState(hasAdminKey)
   const [keyInput, setKeyInput] = useState('')
@@ -51,6 +59,8 @@ function AdminPage() {
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [cancellingOpenids, setCancellingOpenids] = useState<string[]>([])
+  const [operatingJobIds, setOperatingJobIds] = useState<string[]>([])
+  const [retryingUsers, setRetryingUsers] = useState<string[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const jobPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -94,14 +104,14 @@ function AdminPage() {
     refreshJobs()
     refreshMonitor()
     refreshSettings()
-    pollRef.current = setInterval(refreshJobs, 10000)
+    pollRef.current = setInterval(refreshJobs, 3000)
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [authed, refreshJobs, refreshMonitor, refreshSettings])
 
   useEffect(() => {
-    if (!activeJob || activeJob.status === 'succeeded' || activeJob.status === 'failed') {
+    if (!activeJob || isTerminalJob(activeJob)) {
       if (jobPollRef.current) clearInterval(jobPollRef.current)
       return
     }
@@ -110,9 +120,7 @@ function AdminPage() {
         const res = await getJob(activeJob.id)
         if (res.ok && res.job) {
           setActiveJob(res.job)
-          if (res.job.status === 'succeeded' || res.job.status === 'failed') {
-            refreshJobs()
-          }
+          refreshJobs()
         }
       } catch { /* ignore */ }
     }, 2000)
@@ -181,6 +189,71 @@ function AdminPage() {
       message.error(err instanceof Error ? err.message : '保存通知设置失败')
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  const handleStopJob = async (job: Job) => {
+    setOperatingJobIds((prev) => (prev.includes(job.id) ? prev : [...prev, job.id]))
+    try {
+      const res = await stopJob(job.id)
+      if (!res.ok || !res.job) {
+        message.error(res.error || '停止任务失败')
+        return
+      }
+      setActiveJob(res.job)
+      message.success('已请求停止任务')
+      refreshJobs()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '停止任务失败')
+    } finally {
+      setOperatingJobIds((prev) => prev.filter((id) => id !== job.id))
+    }
+  }
+
+  const handleRetryJob = async (job: Job) => {
+    setOperatingJobIds((prev) => (prev.includes(job.id) ? prev : [...prev, job.id]))
+    try {
+      const res = await retryJob(job.id)
+      if (!res.ok) {
+        message.error(res.error || '重试任务失败')
+        return
+      }
+      if (res.accepted) {
+        message.success('已开始重试任务')
+        setActiveJob(res.job || null)
+      } else {
+        message.warning('已有任务在执行中')
+        setActiveJob(res.job || null)
+      }
+      refreshJobs()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '重试任务失败')
+    } finally {
+      setOperatingJobIds((prev) => prev.filter((id) => id !== job.id))
+    }
+  }
+
+  const handleRetryUser = async (job: Job, result: UserResult) => {
+    const key = `${job.id}:${result.openid}`
+    setRetryingUsers((prev) => (prev.includes(key) ? prev : [...prev, key]))
+    try {
+      const res = await retryJobUser(job.id, result.openid)
+      if (!res.ok) {
+        message.error(res.error || '重试用户失败')
+        return
+      }
+      if (res.accepted) {
+        message.success(`已开始重试 ${result.nickname || result.openid}`)
+        setActiveJob(res.job || null)
+      } else {
+        message.warning('已有任务在执行中')
+        setActiveJob(res.job || null)
+      }
+      refreshJobs()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '重试用户失败')
+    } finally {
+      setRetryingUsers((prev) => prev.filter((item) => item !== key))
     }
   }
 
@@ -336,10 +409,36 @@ function AdminPage() {
       key: 'createdAt',
       width: 190,
       render: (t: string) => new Date(t).toLocaleString('zh-CN')
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 180,
+      fixed: 'right' as const,
+      render: (_: unknown, record: Job) => (
+        <Space size={6}>
+          <Button
+            size="small"
+            danger
+            disabled={isTerminalJob(record)}
+            loading={operatingJobIds.includes(record.id)}
+            onClick={() => void handleStopJob(record)}
+          >
+            停止
+          </Button>
+          <Button
+            size="small"
+            loading={operatingJobIds.includes(record.id)}
+            onClick={() => void handleRetryJob(record)}
+          >
+            重试
+          </Button>
+        </Space>
+      )
     }
   ]
 
-  const jobUserColumns = [
+  const createJobUserColumns = (job: Job) => [
     {
       title: '用户',
       key: 'user',
@@ -376,6 +475,24 @@ function AdminPage() {
           })}
         </Space>
       )
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 110,
+      fixed: 'right' as const,
+      render: (_: unknown, result: UserResult) => {
+        const key = `${job.id}:${result.openid}`
+        return (
+          <Button
+            size="small"
+            loading={retryingUsers.includes(key)}
+            onClick={() => void handleRetryUser(job, result)}
+          >
+            重试此人
+          </Button>
+        )
+      }
     }
   ]
 
@@ -434,23 +551,23 @@ function AdminPage() {
 
       <Card title="最近任务" className="admin-card">
         <Table
-          dataSource={jobs}
+	          dataSource={jobs}
           columns={jobColumns}
           rowKey="id"
           size="small"
           pagination={false}
           scroll={{ x: 760 }}
           expandable={{
-            expandedRowRender: (record: Job) =>
-              record.result ? (
-                <Table
-                  dataSource={record.result.users}
-                  columns={jobUserColumns}
-                  rowKey="openid"
-                  size="small"
-                  pagination={false}
-                  scroll={{ x: 1170 }}
-                />
+	            expandedRowRender: (record: Job) =>
+	              record.result ? (
+	                <Table
+	                  dataSource={record.result.users}
+	                  columns={createJobUserColumns(record)}
+	                  rowKey="openid"
+	                  size="small"
+	                  pagination={false}
+	                  scroll={{ x: 1280 }}
+	                />
               ) : (
                 <Text type="secondary">{record.error || '暂无结果'}</Text>
               )

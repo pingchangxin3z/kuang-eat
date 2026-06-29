@@ -229,6 +229,37 @@ app.get(
   })
 )
 
+app.post(
+  '/api/jobs/:jobId/stop',
+  asyncRoute(async (req: Request, res: Response) => {
+    assertTriggerSecret(req)
+    const job = await service.stopJob(req.params.jobId as string)
+    if (!job) {
+      res.status(404).json({ ok: false, error: 'job not found' })
+      return
+    }
+    res.json({ ok: true, job })
+  })
+)
+
+app.post(
+  '/api/jobs/:jobId/retry',
+  asyncRoute(async (req: Request, res: Response) => {
+    assertTriggerSecret(req)
+    const result = await service.retryJob(req.params.jobId as string)
+    res.status(result.accepted ? 202 : 200).json({ ok: true, ...result })
+  })
+)
+
+app.post(
+  '/api/jobs/:jobId/retry-user',
+  asyncRoute(async (req: Request, res: Response) => {
+    assertTriggerSecret(req)
+    const result = await service.retryUser((req.body as Record<string, unknown>)?.openid, req.params.jobId)
+    res.status(result.accepted ? 202 : 200).json({ ok: true, ...result })
+  })
+)
+
 app.use(express.static(staticDir))
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (
