@@ -31,6 +31,11 @@ function normalizeAppSettings(value: Partial<AppSettings> | null | undefined): A
   }
 }
 
+function toPositiveInt(value: unknown, fallback: number): number {
+  const next = Number(value)
+  return Number.isFinite(next) && next > 0 ? Math.trunc(next) : fallback
+}
+
 export class JsonStorage implements Storage {
   private filePath: string
 
@@ -125,7 +130,9 @@ export class PostgresStorage implements Storage {
     const pg = await import('pg')
     this.pool = new pg.default.Pool({
       connectionString: this.connectionString,
-      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined
+      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined,
+      connectionTimeoutMillis: toPositiveInt(process.env.PG_CONNECTION_TIMEOUT_MS, 5000),
+      query_timeout: toPositiveInt(process.env.PG_QUERY_TIMEOUT_MS, 10000)
     })
     await this.pool.query(`
       create table if not exists kuang_eat_monitor_state (

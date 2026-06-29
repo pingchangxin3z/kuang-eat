@@ -90,7 +90,7 @@ STORAGE_DRIVER=postgres DATABASE_URL='postgres://user:pass@host:5432/db' npm run
 ## GitHub Actions / k3s 部署
 
 生产镜像会启动 Express 后端，同时托管前端静态文件。部署到 k3s 时，GitHub Actions 会创建
-Kubernetes Secret `${APP_NAME}-env`，并把后端需要的环境变量注入 Deployment。
+PostgreSQL、PVC、Service、Kubernetes Secret `${APP_NAME}-env`，并把后端需要的环境变量注入 Deployment。
 
 GitHub Actions 必填 Secrets：
 
@@ -100,7 +100,7 @@ TCR_PASSWORD=<腾讯云镜像仓库密码>
 SERVER_HOST=<k3s 服务器地址>
 SERVER_USER=<SSH 用户名>
 SERVER_SSH_KEY=<SSH 私钥>
-DATABASE_URL=postgres://user:pass@host:5432/db
+POSTGRES_PASSWORD=<k3s 内 PostgreSQL 密码>
 MONITOR_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/...
 ```
 
@@ -108,12 +108,6 @@ MONITOR_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/...
 
 ```text
 MONITOR_TRIGGER_SECRET=<飞书触发接口密钥>
-```
-
-如果 PostgreSQL 需要 SSL，在 GitHub Actions Variables 里配置：
-
-```text
-PGSSL=true
 ```
 
 如果 SSH 端口不是 `22`，在 GitHub Actions Variables 里配置：
@@ -126,10 +120,10 @@ SERVER_PORT=<SSH 端口>
 
 ```text
 STORAGE_DRIVER=postgres
-DATABASE_URL=<来自 Kubernetes Secret>
+DATABASE_URL=postgres://kuang_eat:<POSTGRES_PASSWORD>@kuang-eat-postgres:5432/kuang_eat
 MONITOR_FEISHU_WEBHOOK=<来自 Kubernetes Secret>
 MONITOR_TRIGGER_SECRET=<来自 Kubernetes Secret，可为空>
-PGSSL=<来自 GitHub Variables，默认 false>
+PGSSL=false
 ```
 
 ## 常用环境变量

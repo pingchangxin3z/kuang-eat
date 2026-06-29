@@ -122,7 +122,12 @@ async function proxyOrderApi(req: Request, res: Response, next: NextFunction): P
 }
 
 const storage = createStorage()
-await storage.init()
+try {
+  await storage.init()
+} catch (error) {
+  console.error('[kuang-eat] storage init failed', error)
+  process.exit(1)
+}
 
 const service = new MonitorService(storage)
 const app = express()
