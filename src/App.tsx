@@ -520,9 +520,6 @@ function App() {
             {savingMonitor ? '登记中…' : '发起监控'}
           </button>
         </div>
-        <p className="input-hint" style={{ marginTop: '0.5rem' }}>
-          后端会保存当前配置；飞书请求后端触发接口时，才会按这份配置为已勾选用户执行抢饭。
-        </p>
       </section>
 
       {status.msg && (
