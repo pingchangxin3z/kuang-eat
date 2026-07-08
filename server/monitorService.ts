@@ -9,6 +9,7 @@ const MEAL_LABELS: Record<number, string> = {
 }
 
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000
 
 function toInt(value: unknown, fallback: number): number {
   const next = Number(value)
@@ -132,6 +133,11 @@ function isoFromUtcDate(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
 
+function compareYmd(left: string, right: string): number {
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
 function getWeekDates(isoDateStr: string): string[] {
   const { year, month, day } = parseYmd(isoDateStr)
   const base = new Date(Date.UTC(year, month - 1, day, 12, 0, 0))
@@ -144,6 +150,37 @@ function getWeekDates(isoDateStr: string): string[] {
     base.setUTCDate(base.getUTCDate() + 1)
   }
   return dates
+}
+
+function getMondayOfWeek(isoDateStr: string): string {
+  return getWeekDates(isoDateStr)[0]
+}
+
+function getChinaLocalYmd(date: Date): string {
+  return new Date(date.getTime() + CHINA_TIME_OFFSET_MS).toISOString().slice(0, 10)
+}
+
+function getDefaultOrderingWeekPick(now = new Date()): string {
+  const today = getChinaLocalYmd(now)
+  const { year, month, day } = parseYmd(today)
+  const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0))
+  const weekday = date.getUTCDay()
+  const daysToAdd = weekday === 1 ? 7 : (8 - weekday) % 7
+  date.setUTCDate(date.getUTCDate() + daysToAdd)
+  return isoFromUtcDate(date)
+}
+
+function advanceSettingsWeek(settings: MonitorSettings, targetWeekPick: string): MonitorSettings {
+  const currentMonday = getMondayOfWeek(settings.weekPick)
+  const targetMonday = getMondayOfWeek(targetWeekPick)
+  if (compareYmd(currentMonday, targetMonday) >= 0) return settings
+  return { ...settings, weekPick: targetWeekPick }
+}
+
+function settingsNeedWeekAdvance(settings: MonitorSettings, targetWeekPick: string): boolean {
+  const currentMonday = getMondayOfWeek(settings.weekPick)
+  const targetMonday = getMondayOfWeek(targetWeekPick)
+  return compareYmd(currentMonday, targetMonday) < 0
 }
 
 function toMealDate(dateStr: string): string {
@@ -301,7 +338,7 @@ export class MonitorService {
   }
 
   async trigger(payload: unknown = {}): Promise<{ accepted: boolean; job: Job | null }> {
-    const monitor = await this.storage.getMonitor()
+    let monitor = await this.storage.getMonitor()
     if (!monitor) {
       const error: HttpError = new Error('尚未发起监控')
       error.statusCode = 409
@@ -314,6 +351,7 @@ export class MonitorService {
       }
     }
 
+    monitor = await this.refreshMonitorWeekForTrigger(monitor, payload)
     return await this.startJob(monitor, payload)
   }
 
@@ -401,6 +439,37 @@ export class MonitorService {
       console.error('[monitor] job failed', error)
     })
     return { accepted: true, job }
+  }
+
+  private async refreshMonitorWeekForTrigger(monitor: Monitor, payload: unknown): Promise<Monitor> {
+    const p = (payload || {}) as Record<string, unknown>
+    if (p.retryOfJobId) return monitor
+
+    const targetWeekPick = getDefaultOrderingWeekPick()
+    const changed =
+      settingsNeedWeekAdvance(monitor.settings, targetWeekPick) ||
+      monitor.users.some((user) => !user.settings || settingsNeedWeekAdvance(user.settings, targetWeekPick))
+    if (!changed) return monitor
+
+    const task = this.monitorWriteQueue.then(async () => {
+      const currentMonitor = await this.storage.getMonitor()
+      if (!currentMonitor || currentMonitor.id !== monitor.id) return currentMonitor || monitor
+      const refreshedSettings = advanceSettingsWeek(currentMonitor.settings, targetWeekPick)
+      const refreshedUsers = currentMonitor.users.map((user) => ({
+        ...user,
+        settings: advanceSettingsWeek(user.settings || currentMonitor.settings, targetWeekPick)
+      }))
+      const nextMonitor: Monitor = {
+        ...currentMonitor,
+        updatedAt: new Date().toISOString(),
+        settings: refreshedSettings,
+        users: refreshedUsers
+      }
+      await this.storage.saveMonitor(nextMonitor)
+      return nextMonitor
+    })
+    this.monitorWriteQueue = task.catch(() => {})
+    return await task
   }
 
   private async runJob(jobId: string, monitor: Monitor): Promise<Job> {
