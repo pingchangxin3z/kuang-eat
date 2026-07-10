@@ -15,6 +15,8 @@ interface State {
 function defaultAppSettings(): AppSettings {
   return {
     feishuNotifyEnabled: true,
+    orderSelectedWeekdays: null,
+    orderSelectedMealTypes: null,
     updatedAt: new Date().toISOString()
   }
 }
@@ -27,6 +29,8 @@ function normalizeAppSettings(value: Partial<AppSettings> | null | undefined): A
   const defaults = defaultAppSettings()
   return {
     feishuNotifyEnabled: value?.feishuNotifyEnabled !== false,
+    orderSelectedWeekdays: Array.isArray(value?.orderSelectedWeekdays) ? value.orderSelectedWeekdays : null,
+    orderSelectedMealTypes: Array.isArray(value?.orderSelectedMealTypes) ? value.orderSelectedMealTypes : null,
     updatedAt: value?.updatedAt || defaults.updatedAt
   }
 }

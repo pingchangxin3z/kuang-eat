@@ -80,6 +80,8 @@ export interface Job {
 
 export interface AppSettings {
   feishuNotifyEnabled: boolean
+  orderSelectedWeekdays: number[] | null
+  orderSelectedMealTypes: number[] | null
   updatedAt: string
 }
 

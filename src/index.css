@@ -410,6 +410,32 @@ textarea {
   flex: 0 0 auto;
 }
 
+.admin-setting-row--stacked {
+  align-items: flex-start;
+}
+
+.admin-execution-settings {
+  flex: 1;
+  min-width: 520px;
+}
+
+.admin-checkbox-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.admin-checkbox-line__label {
+  flex: 0 0 48px;
+  line-height: 32px;
+}
+
+.admin-checkbox-line .ant-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
 .admin-card .ant-table-wrapper {
   max-width: 100%;
 }
@@ -438,6 +464,18 @@ textarea {
 
 .admin-card .ant-table-expanded-row .ant-table-wrapper {
   margin: 0;
+}
+
+@media (max-width: 760px) {
+  .admin-setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-execution-settings {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 .run-result--no_match .run-result__msg {

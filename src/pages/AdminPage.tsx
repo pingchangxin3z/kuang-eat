@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Button, Card, Table, Tag, Input, Space, Typography, Alert, Descriptions, message, Popconfirm, Switch } from 'antd'
+import { Button, Card, Table, Tag, Input, Space, Typography, Alert, Descriptions, message, Popconfirm, Switch, Checkbox } from 'antd'
 import {
   triggerGrab,
   stopJob,
@@ -28,6 +28,8 @@ const STATUS_TAG: Record<string, { color: string; label: string }> = {
 
 const MEAL_LABELS: Record<number, string> = { 1: '早餐', 2: '午餐', 3: '晚餐' }
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const WEEKDAY_OPTIONS = WEEKDAY_LABELS.map((label, value) => ({ label, value }))
+const MEAL_OPTIONS = Object.entries(MEAL_LABELS).map(([value, label]) => ({ label, value: Number(value) }))
 
 function summarizeSettings(settings: MonitorSettings): string {
   const weekdays = settings.selectedWeekdays.map((day) => WEEKDAY_LABELS[day] || String(day)).join('、')
@@ -37,6 +39,14 @@ function summarizeSettings(settings: MonitorSettings): string {
       ? `关键词：${settings.keywords || '-'}`
       : `总量：早/晚<=${settings.stockThresholdBreakfastDinner}，午<=${settings.stockThresholdLunch}`
   return `${settings.weekPick} 所在周；${weekdays || '-'}；${meals || '-'}；${rule}`
+}
+
+function formatWeekdays(weekdays: number[]): string {
+  return weekdays.map((day) => WEEKDAY_LABELS[day] || String(day)).join('、') || '-'
+}
+
+function formatMealTypes(mealTypes: number[]): string {
+  return mealTypes.map((meal) => MEAL_LABELS[meal] || String(meal)).join('、') || '-'
 }
 
 function summarizeUserResult(result: UserResult | undefined): string {
@@ -56,6 +66,8 @@ function AdminPage() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [monitor, setMonitor] = useState<Monitor | null>(null)
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null)
+  const [executionWeekdays, setExecutionWeekdays] = useState<number[]>([])
+  const [executionMealTypes, setExecutionMealTypes] = useState<number[]>([])
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [cancellingOpenids, setCancellingOpenids] = useState<string[]>([])
@@ -109,6 +121,12 @@ function AdminPage() {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [authed, refreshJobs, refreshMonitor, refreshSettings])
+
+  useEffect(() => {
+    if (!monitor) return
+    setExecutionWeekdays(appSettings?.orderSelectedWeekdays || monitor.settings.selectedWeekdays)
+    setExecutionMealTypes(appSettings?.orderSelectedMealTypes || monitor.settings.selectedMealTypes)
+  }, [appSettings, monitor])
 
   useEffect(() => {
     if (!activeJob || isTerminalJob(activeJob)) {
@@ -171,6 +189,8 @@ function AdminPage() {
   const handleFeishuNotifyChange = async (checked: boolean) => {
     const previous = appSettings
     setAppSettings({
+      orderSelectedWeekdays: previous?.orderSelectedWeekdays || null,
+      orderSelectedMealTypes: previous?.orderSelectedMealTypes || null,
       feishuNotifyEnabled: checked,
       updatedAt: new Date().toISOString()
     })
@@ -187,6 +207,64 @@ function AdminPage() {
     } catch (err) {
       setAppSettings(previous)
       message.error(err instanceof Error ? err.message : '保存通知设置失败')
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+
+  const handleExecutionSettingsSave = async () => {
+    if (executionWeekdays.length === 0) {
+      message.warning('请至少选择一个工作日')
+      return
+    }
+    if (executionMealTypes.length === 0) {
+      message.warning('请至少选择一个餐次')
+      return
+    }
+    const previous = appSettings
+    setSettingsSaving(true)
+    try {
+      const res = await updateAdminSettings({
+        orderSelectedWeekdays: executionWeekdays,
+        orderSelectedMealTypes: executionMealTypes
+      })
+      if (!res.ok || !res.settings) {
+        setAppSettings(previous)
+        message.error(res.error || '保存执行范围失败')
+        return
+      }
+      setAppSettings(res.settings)
+      message.success('已保存执行范围')
+    } catch (err) {
+      setAppSettings(previous)
+      message.error(err instanceof Error ? err.message : '保存执行范围失败')
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+
+  const handleExecutionSettingsReset = async () => {
+    const previous = appSettings
+    setSettingsSaving(true)
+    try {
+      const res = await updateAdminSettings({
+        orderSelectedWeekdays: null,
+        orderSelectedMealTypes: null
+      })
+      if (!res.ok || !res.settings) {
+        setAppSettings(previous)
+        message.error(res.error || '恢复用户选择失败')
+        return
+      }
+      setAppSettings(res.settings)
+      if (monitor) {
+        setExecutionWeekdays(monitor.settings.selectedWeekdays)
+        setExecutionMealTypes(monitor.settings.selectedMealTypes)
+      }
+      message.success('已恢复按用户选择执行')
+    } catch (err) {
+      setAppSettings(previous)
+      message.error(err instanceof Error ? err.message : '恢复用户选择失败')
     } finally {
       setSettingsSaving(false)
     }
@@ -518,6 +596,55 @@ function AdminPage() {
               onChange={handleFeishuNotifyChange}
             />
           </div>
+          <div className="admin-setting-row admin-setting-row--stacked">
+            <Space direction="vertical" size={4}>
+              <Text strong>执行范围</Text>
+              <Text type="secondary">
+                {appSettings?.orderSelectedWeekdays || appSettings?.orderSelectedMealTypes
+                  ? '当前使用管理员覆盖配置'
+                  : '当前默认沿用用户选择'}
+              </Text>
+            </Space>
+            <Space direction="vertical" size={10} className="admin-execution-settings">
+              <div className="admin-checkbox-line">
+                <Text className="admin-checkbox-line__label">工作日</Text>
+                <Checkbox.Group
+                  options={WEEKDAY_OPTIONS}
+                  value={executionWeekdays}
+                  disabled={!monitor || settingsLoading || settingsSaving}
+                  onChange={(values) => setExecutionWeekdays(values.map(Number).sort((a, b) => a - b))}
+                />
+              </div>
+              <div className="admin-checkbox-line">
+                <Text className="admin-checkbox-line__label">餐次</Text>
+                <Checkbox.Group
+                  options={MEAL_OPTIONS}
+                  value={executionMealTypes}
+                  disabled={!monitor || settingsLoading || settingsSaving}
+                  onChange={(values) => setExecutionMealTypes(values.map(Number).sort((a, b) => a - b))}
+                />
+              </div>
+              <Space>
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={settingsSaving}
+                  disabled={!monitor || settingsLoading}
+                  onClick={() => void handleExecutionSettingsSave()}
+                >
+                  保存执行范围
+                </Button>
+                <Button
+                  size="small"
+                  loading={settingsSaving}
+                  disabled={!monitor || settingsLoading}
+                  onClick={() => void handleExecutionSettingsReset()}
+                >
+                  恢复用户选择
+                </Button>
+              </Space>
+            </Space>
+          </div>
           <Button type="primary" size="large" loading={triggering} onClick={handleTrigger}>
             手动触发抢饭
           </Button>
@@ -583,10 +710,15 @@ function AdminPage() {
             </Descriptions.Item>
             <Descriptions.Item label="日期基准">{monitor.settings.weekPick}</Descriptions.Item>
             <Descriptions.Item label="工作日">
-              {monitor.settings.selectedWeekdays.map(d => ['周一','周二','周三','周四','周五','周六','周日'][d]).join('、')}
+              {formatWeekdays(monitor.settings.selectedWeekdays)}
             </Descriptions.Item>
             <Descriptions.Item label="餐次">
-              {monitor.settings.selectedMealTypes.map(t => ({1:'早餐',2:'午餐',3:'晚餐'}[t])).join('、')}
+              {formatMealTypes(monitor.settings.selectedMealTypes)}
+            </Descriptions.Item>
+            <Descriptions.Item label="管理员执行范围">
+              {appSettings?.orderSelectedWeekdays || appSettings?.orderSelectedMealTypes
+                ? `${formatWeekdays(appSettings.orderSelectedWeekdays || monitor.settings.selectedWeekdays)}；${formatMealTypes(appSettings.orderSelectedMealTypes || monitor.settings.selectedMealTypes)}`
+                : '未覆盖，按用户选择执行'}
             </Descriptions.Item>
             <Descriptions.Item label="匹配模式">
               {monitor.settings.matchMode === 'keywords' ? `关键词: ${monitor.settings.keywords}` : '库存阈值'}

@@ -10,6 +10,10 @@ const MEAL_LABELS: Record<number, string> = {
 
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000
+const DEFAULT_MENU_POLL_INTERVAL_MS = 200
+const DEFAULT_ORDER_CONCURRENCY = Number.MAX_SAFE_INTEGER
+
+type MenuProvider = (mealType: number, mealDate: string, shouldStop: () => boolean) => Promise<MenuItem[]>
 
 function toInt(value: unknown, fallback: number): number {
   const next = Number(value)
@@ -21,6 +25,12 @@ function normalizeIntArray(value: unknown, allowed: number[], fallback: number[]
   return [...set].filter((item) => allowed.includes(item)).sort((a, b) => a - b)
 }
 
+function normalizeOptionalIntArray(value: unknown, allowed: number[]): number[] | null {
+  if (value === null) return null
+  if (!Array.isArray(value)) return null
+  return normalizeIntArray(value, allowed, [])
+}
+
 function toBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === 'boolean') return value
   if (typeof value === 'number') return value !== 0
@@ -29,6 +39,10 @@ function toBoolean(value: unknown, fallback: boolean): boolean {
   if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true
   if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) return false
   return fallback
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function parseKeywords(input: string): string[] {
@@ -183,6 +197,20 @@ function settingsNeedWeekAdvance(settings: MonitorSettings, targetWeekPick: stri
   return compareYmd(currentMonday, targetMonday) < 0
 }
 
+function applyOrderSettingsOverride(settings: MonitorSettings, appSettings: AppSettings): MonitorSettings {
+  return {
+    ...settings,
+    selectedWeekdays:
+      appSettings.orderSelectedWeekdays && appSettings.orderSelectedWeekdays.length > 0
+        ? appSettings.orderSelectedWeekdays
+        : settings.selectedWeekdays,
+    selectedMealTypes:
+      appSettings.orderSelectedMealTypes && appSettings.orderSelectedMealTypes.length > 0
+        ? appSettings.orderSelectedMealTypes
+        : settings.selectedMealTypes
+  }
+}
+
 function toMealDate(dateStr: string): string {
   return String(dateStr).replace(/-/g, '')
 }
@@ -226,6 +254,56 @@ function formatUserNotification(result: UserResult): string {
   return `- ${result.nickname || result.openid}${failedSummary}\n  ${lines.join('\n  ')}`
 }
 
+function menuCacheKey(mealType: number, mealDate: string): string {
+  return `${mealDate}:${mealType}`
+}
+
+function createMenuProvider(
+  orderClient: OrderClient,
+  openids: string[],
+  pollIntervalMs: number
+): MenuProvider {
+  const menuCache = new Map<string, Promise<MenuItem[]>>()
+  let nextOpenidIndex = 0
+
+  const nextOpenid = () => {
+    const openid = openids[nextOpenidIndex % openids.length]
+    nextOpenidIndex = (nextOpenidIndex + 1) % openids.length
+    return openid
+  }
+
+  return async (mealType, mealDate, shouldStop) => {
+    const key = menuCacheKey(mealType, mealDate)
+    const cached = menuCache.get(key)
+    if (cached) return await cached
+
+    const request = pollMenuUntilAvailable(orderClient, nextOpenid, mealType, mealDate, pollIntervalMs, shouldStop)
+      .catch((error) => {
+        menuCache.delete(key)
+        throw error
+      })
+    menuCache.set(key, request)
+    return await request
+  }
+}
+
+async function pollMenuUntilAvailable(
+  orderClient: OrderClient,
+  nextOpenid: () => string,
+  mealType: number,
+  mealDate: string,
+  pollIntervalMs: number,
+  shouldStop: () => boolean
+): Promise<MenuItem[]> {
+  while (true) {
+    if (shouldStop()) throw new Error('已停止')
+    const openid = nextOpenid()
+    const menu = await orderClient.getMenu(openid, mealType, mealDate)
+    if (menu.length > 0) return menu
+    await sleep(pollIntervalMs)
+  }
+}
+
 async function runWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -255,11 +333,13 @@ export class MonitorService {
   private stopRequestedJobIds = new Set<string>()
   private monitorWriteQueue: Promise<unknown> = Promise.resolve()
   private concurrency: number
+  private menuPollIntervalMs: number
 
   constructor(storage: Storage, options: { orderClient?: OrderClient } = {}) {
     this.storage = storage
     this.orderClient = options.orderClient || new OrderClient()
-    this.concurrency = Math.max(1, toInt(process.env.ORDER_CONCURRENCY, 3))
+    this.concurrency = Math.max(1, toInt(process.env.ORDER_CONCURRENCY, DEFAULT_ORDER_CONCURRENCY))
+    this.menuPollIntervalMs = Math.max(1, toInt(process.env.ORDER_MENU_POLL_INTERVAL_MS, DEFAULT_MENU_POLL_INTERVAL_MS))
   }
 
   async registerMonitor(payload: unknown): Promise<Monitor> {
@@ -284,9 +364,17 @@ export class MonitorService {
   async updateAppSettings(payload: unknown): Promise<AppSettings> {
     const current = await this.storage.getAppSettings()
     const p = (payload || {}) as Record<string, unknown>
+    const hasWeekdays = Object.prototype.hasOwnProperty.call(p, 'orderSelectedWeekdays')
+    const hasMealTypes = Object.prototype.hasOwnProperty.call(p, 'orderSelectedMealTypes')
     return await this.storage.saveAppSettings({
       ...current,
       feishuNotifyEnabled: toBoolean(p.feishuNotifyEnabled, current.feishuNotifyEnabled),
+      orderSelectedWeekdays: hasWeekdays
+        ? normalizeOptionalIntArray(p.orderSelectedWeekdays, [0, 1, 2, 3, 4, 5, 6])
+        : current.orderSelectedWeekdays,
+      orderSelectedMealTypes: hasMealTypes
+        ? normalizeOptionalIntArray(p.orderSelectedMealTypes, [1, 2, 3])
+        : current.orderSelectedMealTypes,
       updatedAt: new Date().toISOString()
     })
   }
@@ -487,6 +575,12 @@ export class MonitorService {
 
     try {
       const enabledUsers = monitor.users.filter((user) => user.enabled && user.openid)
+      const appSettings = await this.storage.getAppSettings()
+      const menuProvider = createMenuProvider(
+        this.orderClient,
+        enabledUsers.map((user) => user.openid),
+        this.menuPollIntervalMs
+      )
       const userResults: UserResult[] = []
       const saveProgress = async (finishedAt: string | null = null): Promise<Job> => {
         const allResults = userResults.flatMap((userResult) => userResult.results)
@@ -517,7 +611,8 @@ export class MonitorService {
           }
           const userResult = await this.runUser(
             user,
-            user.settings || monitor.settings,
+            applyOrderSettingsOverride(user.settings || monitor.settings, appSettings),
+            menuProvider,
             () => this.stopRequestedJobIds.has(jobId),
             async (partialResult) => {
               upsertUserResult(partialResult)
@@ -563,6 +658,7 @@ export class MonitorService {
   private async runUser(
     user: MonitorUser,
     settings: MonitorSettings,
+    menuProvider: MenuProvider,
     shouldStop: () => boolean = () => false,
     onProgress: (result: UserResult) => Promise<void> = async () => {}
   ): Promise<UserResult> {
@@ -589,7 +685,7 @@ export class MonitorService {
           mealType === 2 ? settings.stockThresholdLunch : settings.stockThresholdBreakfastDinner
 
         try {
-          const menu = await this.orderClient.getMenu(user.openid, mealType, toMealDate(date))
+          const menu = await menuProvider(mealType, toMealDate(date), shouldStop)
           const matched =
             settings.matchMode === 'keywords'
               ? matchFirstMenuItem(menu, keywords)
@@ -602,16 +698,16 @@ export class MonitorService {
               mealType,
               mealTypeLabel,
               status: 'no_match',
-	              message:
-	                menu.length === 0
-	                  ? '暂无菜单'
-	                  : settings.matchMode === 'keywords'
-	                    ? '未匹配到关键词'
-	                    : `无总量 <= ${threshold} 的套餐`
-	            })
-	            await onProgress(currentResult())
-	            continue
-	          }
+              message:
+                menu.length === 0
+                  ? '暂无菜单'
+                  : settings.matchMode === 'keywords'
+                    ? '未匹配到关键词'
+                    : `无总量 <= ${threshold} 的套餐`
+            })
+            await onProgress(currentResult())
+            continue
+          }
 
           const response = await this.orderClient.createOrder(
             user.openid,
@@ -619,29 +715,29 @@ export class MonitorService {
             settings.addressId,
             settings.addressDetail
           )
-	          results.push({
-	            date,
-	            dateLabel: WEEKDAY_LABELS[dayIndex] || '',
-            mealType,
-            mealTypeLabel,
-            status: Number(response?.code) === 200 ? 'ordered' : 'error',
-	            message: String(response?.msg || ''),
-	            packageName: String(matched.packageName || '').replace(/\n/g, ' ')
-	          })
-	          await onProgress(currentResult())
-	        } catch (error: unknown) {
-	          results.push({
-	            date,
+          results.push({
+            date,
             dateLabel: WEEKDAY_LABELS[dayIndex] || '',
             mealType,
             mealTypeLabel,
-	            status: 'error',
-	            message: error instanceof Error ? error.message : String(error)
-	          })
-	          await onProgress(currentResult())
-	        }
-	      }
-	    }
+            status: Number(response?.code) === 200 ? 'ordered' : 'error',
+            message: String(response?.msg || ''),
+            packageName: String(matched.packageName || '').replace(/\n/g, ' ')
+          })
+          await onProgress(currentResult())
+        } catch (error: unknown) {
+          results.push({
+            date,
+            dateLabel: WEEKDAY_LABELS[dayIndex] || '',
+            mealType,
+            mealTypeLabel,
+            status: 'error',
+            message: error instanceof Error ? error.message : String(error)
+          })
+          await onProgress(currentResult())
+        }
+      }
+    }
 
     return currentResult()
   }
