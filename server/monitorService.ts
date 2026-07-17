@@ -425,6 +425,29 @@ export class MonitorService {
     return await task
   }
 
+  async deleteMonitor(openids: unknown): Promise<MonitorUserStatus[]> {
+    const requested = Array.isArray(openids)
+      ? [...new Set(openids.map((openid) => String(openid || '').trim()).filter(Boolean))]
+      : []
+    if (requested.length === 0) return []
+
+    const requestedSet = new Set(requested)
+    const task = this.monitorWriteQueue.then(async () => {
+      const monitor = await this.storage.getMonitor()
+      if (!monitor) return requested.map((openid) => ({ openid, monitored: false, enabled: false, nickname: '' }))
+
+      const nextMonitor: Monitor = {
+        ...monitor,
+        updatedAt: new Date().toISOString(),
+        users: monitor.users.filter((user) => !requestedSet.has(user.openid))
+      }
+      await this.storage.saveMonitor(nextMonitor)
+      return await this.getUserStatuses(requested)
+    })
+    this.monitorWriteQueue = task.catch(() => {})
+    return await task
+  }
+
   async trigger(payload: unknown = {}): Promise<{ accepted: boolean; job: Job | null }> {
     let monitor = await this.storage.getMonitor()
     if (!monitor) {

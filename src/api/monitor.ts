@@ -88,3 +88,16 @@ export async function cancelMonitor(openids: string[]): Promise<MonitorStatusRes
   }
   return data
 }
+
+export async function deleteMonitor(openids: string[]): Promise<MonitorStatusResponse> {
+  const response = await fetch(`${BACKEND_BASE}/api/monitor/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ openids })
+  })
+  const data = (await response.json()) as MonitorStatusResponse
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || '删除监控人员失败')
+  }
+  return data
+}

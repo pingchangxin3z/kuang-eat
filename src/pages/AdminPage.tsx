@@ -13,7 +13,7 @@ import {
   setAdminKey,
   hasAdminKey
 } from '@/api/admin'
-import { cancelMonitor } from '@/api/monitor'
+import { cancelMonitor, deleteMonitor } from '@/api/monitor'
 import type { AppSettings, Job, Monitor, MonitorSettings, MonitorUser, UserResult } from '../../server/types'
 
 const { Title, Text } = Typography
@@ -71,6 +71,7 @@ function AdminPage() {
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [cancellingOpenids, setCancellingOpenids] = useState<string[]>([])
+  const [deletingOpenids, setDeletingOpenids] = useState<string[]>([])
   const [operatingJobIds, setOperatingJobIds] = useState<string[]>([])
   const [retryingUsers, setRetryingUsers] = useState<string[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -348,6 +349,19 @@ function AdminPage() {
     }
   }
 
+  const handleDeleteMonitor = async (openid: string) => {
+    setDeletingOpenids((prev) => (prev.includes(openid) ? prev : [...prev, openid]))
+    try {
+      await deleteMonitor([openid])
+      message.success('已删除监控人员')
+      refreshMonitor()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '删除监控人员失败')
+    } finally {
+      setDeletingOpenids((prev) => prev.filter((item) => item !== openid))
+    }
+  }
+
   if (!authed) {
     return (
       <div className="admin-login">
@@ -429,26 +443,43 @@ function AdminPage() {
     {
       title: '操作',
       key: 'action',
-      width: 120,
+      width: 190,
       fixed: 'right' as const,
       render: (_: unknown, user: MonitorUser) => (
-        <Popconfirm
-          title="取消监控"
-          description={`确认取消 ${user.nickname || user.openid} 的监控吗？`}
-          okText="确认"
-          cancelText="返回"
-          onConfirm={() => void handleCancelMonitor(user.openid)}
-          disabled={!user.enabled}
-        >
-          <Button
-            danger
-            size="small"
+        <Space size="small">
+          <Popconfirm
+            title="取消监控"
+            description={`确认停用 ${user.nickname || user.openid} 的监控吗？`}
+            okText="确认"
+            cancelText="返回"
+            onConfirm={() => void handleCancelMonitor(user.openid)}
             disabled={!user.enabled}
-            loading={cancellingOpenids.includes(user.openid)}
           >
-            取消监控
-          </Button>
-        </Popconfirm>
+            <Button
+              size="small"
+              disabled={!user.enabled}
+              loading={cancellingOpenids.includes(user.openid)}
+            >
+              取消监控
+            </Button>
+          </Popconfirm>
+          <Popconfirm
+            title="删除监控人员"
+            description={`确认从监控配置中删除 ${user.nickname || user.openid} 吗？历史执行结果会保留。`}
+            okText="删除"
+            cancelText="返回"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => void handleDeleteMonitor(user.openid)}
+          >
+            <Button
+              danger
+              size="small"
+              loading={deletingOpenids.includes(user.openid)}
+            >
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       )
     }
   ]

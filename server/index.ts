@@ -185,6 +185,13 @@ app.post(
 )
 
 app.post(
+  '/api/monitor/delete',
+  asyncRoute(async (req: Request, res: Response) => {
+    res.json({ ok: true, statuses: await service.deleteMonitor((req.body as Record<string, unknown>)?.openids) })
+  })
+)
+
+app.post(
   '/api/trigger/grab',
   asyncRoute(async (req: Request, res: Response) => {
     assertTriggerSecret(req)
